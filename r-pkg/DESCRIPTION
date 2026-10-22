@@ -55,10 +55,9 @@ Suggests:
     tibble,
     vctrs,
     withr
-Additional_repositories: https://community.r-multiverse.org
 Config/testthat/edition: 3
 Copyright: file inst/COPYRIGHTS
 Encoding: UTF-8
 NeedsCompilation: yes
-Roxygen: list(markdown = TRUE)
-RoxygenNote: 8.0.0
+Config/roxygen2/markdown: TRUE
+Config/roxygen2/version: 8.1.1
