@@ -264,8 +264,9 @@ export class ArfSession {
   /**
    * Evaluate through R's normal REPL (`arf ipc eval --visible`), so task
    * callbacks, autoprinting, and `.Last.value` behave as in interactive R.
-   * The response carries no `value` or `error`; failures are reported through
-   * `status` and `stderr`. Use `eval()` when the value is needed.
+   * The response's `value` and `error` are null or absent; failures are
+   * reported through `status` and `stderr`. Use `eval()` when the value is
+   * needed.
    */
   async evalVisible(
     code: string,
@@ -274,7 +275,7 @@ export class ArfSession {
     const result = await this.send(code, { timeoutMs, visible: true })
       .wait(timeoutMs + 2_000);
     if (
-      result.error !== null ||
+      result.error != null ||
       (result.status !== undefined && result.status !== "ok")
     ) {
       throw new Error(
