@@ -37,13 +37,23 @@ while the loop runs, so no request is processed. Poll explicitly with
 }
 
 \examples{
-\dontrun{
-# In a script: keep answering the viewer for 60 seconds.
-jdv_view(mtcars)
-deadline <- Sys.time() + 60
-while (Sys.time() < deadline) {
-jdv_rpc(NULL)
-Sys.sleep(0.1)
-}
+# Embedding API: answer one JSON request without a viewer connection.
+id <- jdv_register(mtcars)$id
+response <- jdv_rpc(sprintf(
+  '{"id":1,"method":"view/schema","params":{"view":"\%s","generation":1}}',
+  id
+))
+substr(response, 1, 60)
+jdv_disconnect()
+
+# In a script: keep answering an external viewer for 10 seconds. This needs
+# a running viewer application, so it only runs in an interactive session.
+if (interactive()) {
+  jdv_view(mtcars)
+  deadline <- Sys.time() + 10
+  while (Sys.time() < deadline) {
+    jdv_rpc(NULL)
+    Sys.sleep(0.1)
+  }
 }
 }

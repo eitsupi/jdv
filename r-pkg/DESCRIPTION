@@ -31,6 +31,12 @@ Authors@R:
         "Jørgensen",
         role = "cph",
         comment = "flatcc in src/nanoarrow/"
+      ),
+      person(
+        "Paul",
+        "Hsieh",
+        role = c("ctb", "cph"),
+        comment = "portable stdint.h bundled with flatcc in src/nanoarrow/"
       )
     )
 Description: A lightweight data viewer with no package dependencies. It sends
