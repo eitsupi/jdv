@@ -118,9 +118,10 @@
 #' | `"child"`    | A child view is opened by `object/open`.                                                                                                      |
 #' | `"tracked"`  | A producer rebuilds a tracked view automatically.                                                                                               |
 #' | `"refresh"`  | A view is rebuilt by `view/refresh`.                                                                                                          |
+#' | `"resource"` | A view is opened by `resources/open` (see Resource trees).                                                                                    |
 #'
-#' A host can bring a view to the front for `"register"` and `"child"`, and
-#' update it quietly for `"tracked"` and `"refresh"`.
+#' A host can bring a view to the front for `"register"`, `"child"`, and
+#' `"resource"`, and update it quietly for `"tracked"` and `"refresh"`.
 #'
 #' Grid-level flags declare the operations available in protocol v1; each
 #' column's `sortable` field constrains sorting, and `filterable` constrains
@@ -340,6 +341,9 @@
 #' | `cancel`          | Host to producer     | Notification | Names pending work for the producer to cancel.                                |
 #' | `ack`             | Producer to host     | Notification | Cumulatively acknowledges complete host-to-producer JSONL frames read.       |
 #'
+#' The optional `resources/children`, `resources/open`, `resources/subscribe`,
+#' and `resources/changed` methods are described under Resource trees.
+#'
 #'
 #' @section Common protocol: `view/schema`:
 #'
@@ -444,6 +448,9 @@
 #'       "version": "1.0.0"
 #'     },
 #'     "wake": true,
+#'     "capabilities": {
+#'       "resources": true
+#'     },
 #'     "limits": {
 #'       "max_unacked_frames": 264,
 #'       "max_unacked_bytes": 1048577,
@@ -474,6 +481,16 @@
 #' `wake` notifications while requests await terminal responses. When omitted or
 #' `false`, the host must not send `wake`. A producer that needs periodic wakes
 #' sets `wake` to `true`.
+#'
+#' `capabilities` is optional and, when present, is an object of optional
+#' session-level features. Each known member is a Boolean; any other value is
+#' invalid. An omitted member or object means `false`. Unknown members are
+#' ignored. The members defined in v1 are `resources`, which declares the
+#' resource tree methods, and `resource_changes`, which declares change
+#' notifications for the resource tree and requires `resources` (see Resource
+#' trees). A host that does not use a feature ignores its member; declaring a
+#' feature does not by itself cause any request or notification. Capabilities
+#' are fixed for the session when `hello` is sent.
 #'
 #' `hello` is the first producer message on a new connection. A disconnect
 #' closes the views associated with that connection.
@@ -693,7 +710,7 @@
 #' | `interrupted`      | Request processing began and was interrupted.                                                                                                                   |
 #' | `cancelled`        | The accepted request was cancelled before processing began.                                                                                                     |
 #' | `expired`          | The request deadline elapsed before processing began.                                                                                                           |
-#' | `unavailable`      | A well-formed object path no longer resolves or cannot be read safely.                                                                                          |
+#' | `unavailable`      | A well-formed object path or resource node no longer resolves or cannot be read safely.                                                                         |
 #' | `stale_generation` | The request names a generation that is no longer active.                                                                                                        |
 #' | `view_not_found`   | The view id is missing or closed.                                                                                                                               |
 #' | `cache_changed`    | A host-only sequential append cursor differs from the observed tail; refresh the host page catalog before advancing.                                            |
@@ -705,6 +722,373 @@
 #' cannot satisfy a request or configured budget returns `limit_exceeded`.
 #' Per-column channel failures may be reported in the page payload without
 #' failing the entire request.
+#'
+#'
+#' @section Common protocol: Resource trees:
+#'
+#'
+#' A resource tree lists the resources a session offers, such as the top-level
+#' variables of an interpreter or the catalogs, schemas, and tables of a
+#' database connection, so a viewer can browse them without opening a view
+#' first. It is optional: a producer declares it with
+#' `hello.params.capabilities.resources: true`. A host that does not use
+#' resource trees ignores the capability and is not required to handle any
+#' method in this section.
+#'
+#' The resource tree belongs to the session, not to a view. It has no view id
+#' and no generation, it is available while the session has no views, and
+#' closing, refreshing, or replacing views does not change it. It ends with the
+#' session. Inside a view, an object is explored with that view's own methods; a
+#' resource tree only lists entry points and opens them as ordinary views.
+#'
+#' | Method               | Direction        | Kind    | Result                                          |
+#' | -------------------- | ---------------- | ------- | ----------------------------------------------- |
+#' | `resources/children` | Host to producer | Request | One page of the children of a node or the root. |
+#' | `resources/open`     | Host to producer | Request | Opens one node as a new view.                   |
+#'
+#' A host sends these requests only to a session whose `hello` declared the
+#' capability. A producer that did not declare it returns `unsupported` or
+#' `method_not_found`.
+#'
+#' ## Nodes
+#'
+#' The root has no id and is never listed as a node. Every other node is
+#' identified by its `id`, a non-empty string of at most 16,384 UTF-8 bytes
+#' chosen by the producer. An id is opaque: a host or viewer stores it and sends
+#' it back, but does not parse, build, compare as a path, or display it. An id
+#' identifies a node within its session; it is not valid in another session.
+#' While a node exists, the producer gives it the same id in every listing, and
+#' it never gives that id to a different node. Whether a resource that is
+#' removed and created again is the same node is up to the producer; for
+#' example, a producer that identifies variables by name treats them as the
+#' same. An id names a resource, not a value captured when the page was listed:
+#' the producer resolves it again for every request, so a node that still exists
+#' may describe or open different content after a change.
+#'
+#' A child entry has these fields:
+#'
+#' | Field          | Type           | Required | Meaning                                                                                  |
+#' | -------------- | -------------- | -------- | ---------------------------------------------------------------------------------------- |
+#' | `id`           | string         | See text | Opaque node id.                                                                          |
+#' | `label`        | string         | Yes      | Display name, at most 1,000 Unicode code points.                                         |
+#' | `kind`         | string         | Yes      | Display hint token described below.                                                      |
+#' | `summary`      | string         | No       | Short description, at most 1,000 Unicode code points.                                    |
+#' | `has_children` | Boolean        | Yes      | Whether `resources/children` may list children of this node.                             |
+#' | `viewable`     | Boolean        | Yes      | Whether `resources/open` may open this node.                                             |
+#' | `hidden`       | Boolean        | No       | Whether a viewer should hide this node by default; omitted means `false`.                |
+#' | `unavailable`  | string         | No       | Token explaining why the node cannot be read, expanded, or opened.                       |
+#'
+#' `has_children` and `viewable` are independent: a node may be both expandable
+#' and viewable, either one, or neither. When neither is true, the node is still
+#' listed so that the viewer shows it exists. `id` is required unless the node
+#' cannot be identified within the id limit; such a node has
+#' `has_children: false`, `viewable: false`, and `unavailable: "id_limit"`.
+#'
+#' `kind` is a hint for icons and grouping and does not decide which view kind
+#' opens. Recommended tokens are `container` (holds other resources, such as a
+#' schema), `table` (rectangular data), `object` (structured data), `value` (a
+#' scalar or simple vector), `function`, and `unknown`. More tokens may be
+#' added; a viewer treats an unrecognized token as `unknown`. The kind of view
+#' that opens is known only from the `view/open` descriptor. A label is not
+#' unique and is not an id.
+#'
+#' `kind` and `unavailable` tokens are 1 to 64 characters from lowercase ASCII
+#' letters, digits, and `_`.
+#'
+#' `hidden` marks a node that the producer's environment conventionally hides,
+#' for example a name with a leading dot in R. Producers still list hidden
+#' nodes, and they can be addressed and opened as usual; whether to show them is
+#' a viewer option. Hidden nodes count toward `offset`, `limit`,
+#' `total_children`, and `next_offset` like any other node, so a page may hold
+#' only hidden nodes and still have a next page; a viewer advances by
+#' `next_offset`, not by the number of rows it shows. `unavailable` is a short
+#' token from a producer-defined vocabulary; a viewer may show it but must not
+#' depend on a particular value, except `id_limit` above.
+#'
+#' Producers may add fields to a child entry. A viewer ignores fields it does
+#' not know.
+#'
+#' ## `resources/children`
+#'
+#' ```json
+#' {
+#'   "id": "resources-1",
+#'   "method": "resources/children",
+#'   "params": { "node": null, "offset": 0, "limit": 200 }
+#' }
+#' ```
+#'
+#' `node` is a node id, or `null` or omitted for the root. `offset` is a
+#' zero-based, non-negative safe integer that defaults to 0; `limit` is an
+#' integer from 1 through 500 that defaults to 200. Other values return
+#' `invalid_request`. The result is:
+#'
+#' ```json
+#' {
+#'   "node": null,
+#'   "offset": 0,
+#'   "children": [
+#'     {
+#'       "id": "t:main.orders",
+#'       "label": "orders",
+#'       "kind": "table",
+#'       "summary": "table, 12 columns",
+#'       "has_children": false,
+#'       "viewable": true
+#'     }
+#'   ],
+#'   "total_children": 1,
+#'   "next_offset": null
+#' }
+#' ```
+#'
+#' All five fields are required. `node` and `offset` repeat the request, with
+#' `null` for the root; `offset` is not clamped to the end. `children` is an
+#' array of at most `limit` entries. `total_children` is the number of children
+#' when the request was handled as a non-negative safe integer, or `null` when
+#' the producer does not know it. `next_offset` is `null` when this page reaches
+#' the end; otherwise it is `offset` plus the number of children returned, and
+#' `children` is not empty. A producer may return fewer children than `limit` to
+#' stay within its response byte limit, so a short page does not mean the end;
+#' only `next_offset: null` does. If not even one child fits, the request fails
+#' with `limit_exceeded` rather than returning an empty page that is not the
+#' end. An `offset` at or past the end, and a node whose `has_children` is
+#' false, return an empty page with `next_offset: null`.
+#'
+#' Children come in an order that stays the same while the listed resources do
+#' not change. The protocol does not otherwise define the order; a producer
+#' extension may. A page reflects the resources when it was handled: if
+#' resources are added or removed between page requests, a later page may repeat
+#' or skip entries, and `total_children` may change. A viewer that appends pages
+#' for one parent drops entries whose id it already added for that parent since
+#' the listing last started from offset 0; entries without an id are never
+#' treated as duplicates. The same node may appear under different parents. A
+#' viewer refreshes by requesting again from offset 0, either on request or
+#' after a change notification (see Change notifications below).
+#'
+#' ## `resources/open`
+#'
+#' ```json
+#' {
+#'   "id": "resources-2",
+#'   "method": "resources/open",
+#'   "params": { "node": "t:main.orders" }
+#' }
+#' ```
+#'
+#' `node` is a required node id. A producer extension may accept additional open
+#' options. The producer resolves the node and opens it as a new top-level view,
+#' sending its `view/open` notification with `reason: "resource"` before the
+#' response. The result is that view's `view/open.params` descriptor; as for
+#' `object/open`, a host registers the view from the notification, must not
+#' create or revive a view from the response, and uses the response only to find
+#' the view. If building the response fails, the producer closes the view and
+#' does not send its `view/open`.
+#'
+#' The opened view is a top-level view and has no parent view. It follows the
+#' usual view lifecycle and descriptor capabilities, including the producer's
+#' view limits. Listing or refreshing the resource tree does not affect any
+#' view, and closing a view does not change the resource tree. Opening a node
+#' registers a view like any other, so when the producer is at its view limit it
+#' may close an existing view to make room, and `view/closed` is sent as usual.
+#' Every successful open creates a new view, even for a node that is already
+#' open.
+#'
+#' Opening is not idempotent. After a host cancels a sent `resources/open` or
+#' its deadline expires, the view may still be opened and its `view/open` may
+#' still arrive. A host does not retry an open automatically.
+#'
+#' ## Errors
+#'
+#' An id that is malformed or that the producer does not recognize as one of its
+#' own ids returns `invalid_request`. A well-formed id whose resource no longer
+#' exists or cannot be read safely returns `unavailable`, as does
+#' `resources/open` on a node that is not viewable. A producer need not remember
+#' the ids it has issued.
+#'
+#' Resource tree requests follow the same request, queue, byte, acknowledgement,
+#' wake, deadline, and cancellation rules as view requests. Because they name no
+#' view, closing a view or moving it to a new generation does not cancel them;
+#' they end with the requesting client or the session. Their responses are JSON
+#' only and never carry an Arrow IPC binary body.
+#'
+#' ## Change notifications
+#'
+#' A producer that declares `capabilities.resource_changes: true` (together with
+#' `resources: true`) can tell a subscribed host that its resource tree may have
+#' changed. The capability only makes the methods below available; declaring it
+#' does not start any monitoring or send any notification.
+#'
+#' | Method                | Direction        | Kind         | Result                                  |
+#' | --------------------- | ---------------- | ------------ | --------------------------------------- |
+#' | `resources/subscribe` | Host to producer | Request      | `{"enabled": <Boolean>}`, the new state. |
+#' | `resources/changed`   | Producer to host | Notification | None.                                   |
+#'
+#' A session starts unsubscribed. `resources/subscribe` takes a required Boolean
+#' `enabled` and sets the subscription of the session; repeating the same value
+#' has no further effect. The result reports the state that now applies. When
+#' enabling, the producer records the state it compares against before it
+#' answers, so a change made after the response is reported. A host that wants
+#' automatic updates therefore subscribes first and lists the tree after the
+#' subscription succeeds. A producer that did not declare the capability returns
+#' `unsupported` or `method_not_found`. The subscription belongs to the session:
+#' the producer has a single host, which decides how to combine the wishes of
+#' its own clients. It ends with the session.
+#'
+#' While subscribed, the producer sends
+#'
+#' ```json
+#' { "method": "resources/changed", "params": {} }
+#' ```
+#'
+#' when the listed resources may have changed. It is a hint that any listing the
+#' host holds may be out of date, not a description of a change: it names no
+#' node, several changes can be reported by one notification, and a notification
+#' may arrive when nothing visible changed. A host refreshes the parts of the
+#' tree it shows, as for a manual refresh, and lists hidden or collapsed parts
+#' again when they are next shown. A producer that detects a change within the
+#' scope its extension documents, while the session is subscribed and its
+#' notifications can be delivered, sends at least one notification after that
+#' change within a bounded delay. While an earlier `resources/changed` has not
+#' yet been delivered, the producer may drop a new one, because the earlier one
+#' already covers it. It sends no notification while unsubscribed. Unknown
+#' `params` members are ignored. Viewers keep a manual refresh, because a
+#' producer may not detect every change.
+#'
+#'
+#' @section R producer extension: Resource trees:
+#'
+#'
+#' The R producer declares `capabilities.resources: true` in `hello` by default
+#' and serves the common resource tree with the variables of the global
+#' environment. Set `options(jdv.resources = FALSE)` to turn it off: the option
+#' is read when the session's `hello` is created and the result holds for the
+#' whole session, so changing it later takes effect for the next session. A
+#' session without the capability omits the `capabilities` member and answers
+#' `resources/children` and `resources/open` with `unsupported`, without
+#' revealing any name or summary. The same rule applies to the built-in
+#' transport and to an embedded session started by [jdv_register()]. The tree is
+#' available as soon as the session exists, also before any view is open.
+#' [jdv_handle_request()] does not accept `resources/*` requests and returns
+#' `method_not_found`.
+#'
+#' The root lists the bindings of the global environment, one level only. The
+#' search path and the contents of environments are not listed; an environment
+#' is opened as a view and explored with `object/children`. Every child has
+#' `has_children: false`. Bindings whose name starts with a dot are listed with
+#' `hidden: true`. Children are ordered by name in the byte order of their UTF-8
+#' form, independent of the locale; for example, `"Z"` comes before `"a"`.
+#' Because the global environment changes between requests, the weak consistency
+#' of the common protocol applies to paging.
+#'
+#' An id names a binding, not its value. It is `b:` followed by the UTF-8 name,
+#' or `h:` followed by the lowercase hex of the bytes of a name that is not
+#' valid UTF-8. A viewer must still treat it as opaque. A name whose id would
+#' exceed 16,384 UTF-8 bytes is listed without an `id`, with `viewable: false`
+#' and `unavailable: "id_limit"`. An id with an unknown form returns
+#' `invalid_request`; a binding that has been removed returns `unavailable`, for
+#' both `resources/children` and `resources/open`.
+#'
+#' | `kind`     | Value                                                                    |
+#' | ---------- | ------------------------------------------------------------------------ |
+#' | `table`    | A data frame, or an atomic matrix.                                       |
+#' | `function` | A closure, builtin, or special.                                          |
+#' | `value`    | Any other atomic vector, including a factor.                             |
+#' | `object`   | Everything else, such as a list, an environment, `NULL`, or an S4 object. |
+#' | `unknown`  | A binding that cannot be read safely, or whose name has no id.           |
+#'
+#' The kind is decided from the type and the class attribute alone. No
+#' `jdv_source()` method or other S3 method is called to choose it, so the view
+#' that finally opens is known only from its `view/open` descriptor. The R
+#' extension fields `class` and `type` have the same meaning as in
+#' `object/children`. `summary` is at most 1,000 code points and is built
+#' without calling any S3 or S4 method defined for the value, because the root
+#' is listed without the user choosing individual objects: it never reads
+#' elements, calls `format()`, or calls a generic such as `length()`, `dim()`,
+#' `names()`, or `[`. It is the class (or type) name followed by the stored
+#' size: `data.frame [32 × 11]` (rows and columns), `matrix double [3 × 4]`,
+#' `double (100)`, `factor (150)`, `list (5)`, `function`, `environment` (no
+#' binding count), and the class name of an S4 object. A length is the stored
+#' length of the object, not the result of a user-defined `length()` method. The
+#' summary after a value is opened with `object/children` is unchanged.
+#'
+#' A binding is read without evaluating it. Promises that have not been forced,
+#' active bindings, and missing arguments are listed with `viewable: false` and
+#' `unavailable` set to `delayed_binding`, `active_binding`, or
+#' `missing_binding`, and `resources/open` returns `unavailable` for them;
+#' neither request evaluates them. A forced promise is read as its value. Before
+#' R 4.6.0 the value of a binding cannot be read without evaluation, so the
+#' names are listed with `kind: "unknown"`, `viewable: false`, and
+#' `unavailable: "opaque_binding"` (or `active_binding` for an active binding),
+#' and `resources/open` returns `unavailable`.
+#'
+#' `resources/open` accepts `node` and the optional `mode` and `collation` of
+#' `object/open`, with the same values and errors. It opens the current value of
+#' the binding as a new top-level view with `reason: "resource"`. The view's
+#' `title` is the variable name written as an R symbol (backquoted when it is
+#' not syntactic). It is a display name only and takes no title slot, so it
+#' never replaces another view, even one opened with [jdv_view()] under the same
+#' title, and opening the same variable again gives another view with the same
+#' title. The `view/open` notification is queued before the response, and the
+#' view is closed if the response cannot be built. Opening counts against
+#' `jdv.max_tables` like any other registration. From R 4.6.0 the view follows
+#' the binding as [jdv_view()] does: the descriptor carries `tracking`, refresh
+#' reads the current value, and a reassigned variable updates the view. A value
+#' that is a sequential stream, or an R version before 4.6.0, gives a view
+#' without tracking. Listing never closes a view, and opening may close the
+#' oldest view when `jdv.max_tables` is reached.
+#'
+#' A children page that does not fit `jdv.max_message_bytes` is shortened to
+#' fewer children, with `next_offset` pointing at the first child left out. A
+#' single child that does not fit returns `limit_exceeded`.
+#'
+#' ## Change notifications
+#'
+#' The R producer declares `capabilities.resource_changes: true` together with
+#' `resources: true`, so a session with the resource tree always offers
+#' `resources/subscribe`; `options(jdv.resources = FALSE)` removes both. A
+#' session with the resource tree turned off answers `resources/subscribe` with
+#' `unsupported`, and [jdv_handle_request()] returns `method_not_found` for it.
+#' Declaring the capability starts no monitoring: a session is unsubscribed
+#' until the host subscribes, and the subscription, with everything kept for it,
+#' ends with the session (a disconnect, a notification queue overflow, or
+#' unloading the package). `enabled` must be a Boolean, otherwise the request is
+#' `invalid_request`; other members are ignored.
+#'
+#' While subscribed, R compares the listing with the one it saw last. It
+#' compares what the root shows for each binding: the name and id, `kind`,
+#' `class`, `type`, `summary`, `hidden`, `unavailable`, and `viewable`. A
+#' binding that is added, removed, or listed differently, such as a new class,
+#' other dimensions, or a promise that was forced and can now be opened, makes R
+#' queue `resources/changed`. Before R 4.6.0 the comparison still sees names and
+#' whether a binding is an active binding. Because the listing does not show
+#' scalar values, a reassignment that is displayed the same, such as `x <- 1`
+#' followed by `x <- 2`, is not reported; a view opened from the variable is
+#' kept current by tracking, and opening always reads the current value. R keeps
+#' only this display metadata, not the values, and reads bindings the way the
+#' listing does: it does not evaluate a promise or an active binding and does
+#' not call an S3 or S4 method of a value.
+#'
+#' R looks after each top-level task has completed, and also at each call of
+#' `jdv_rpc(NULL)`, whether the task succeeded or not. A change inside a
+#' function, or in the middle of a long task such as `Sys.sleep()`, is seen only
+#' after the task ends. R does not look while a request or refresh is running or
+#' the transport is busy; the next look covers it. The cost is proportional to
+#' the number of bindings in the global environment: every task of a subscribed
+#' session lists all of them, whatever the page size, and there is no strict
+#' time limit.
+#'
+#' At most one `resources/changed` waits in the notification queue. While one
+#' has not been taken, by the transport that sends the queue or by
+#' [jdv_notifications()], further changes queue nothing, and other notifications
+#' are never merged or dropped. After it is taken, the next change queues a new
+#' one. Hosts that use the tree still refresh manually, because a change that
+#' the listing does not show is not reported.
+#'
+#' The same task callback serves tracked views and the subscription, and each
+#' keeps its own state: it exists while a view is tracked or the session is
+#' subscribed. Closing the last tracked view keeps watching for a subscribed
+#' session, and unsubscribing keeps tracking views.
 #'
 #'
 #' @section R producer extension: `object/children`:
@@ -1258,18 +1642,20 @@
 #' (default 64), `jdv.max_page_rows` (default 2,000), `jdv.snapshot_max_cells`
 #' (default 10,000), `jdv.snapshot_max_bytes` (default 10 MiB),
 #' `jdv.max_work_bytes` (default `Inf`), `jdv.max_cache_bytes` (default 32 MiB),
-#' and `jdv.max_query_rows` (default `Inf`). The work and row limits apply to
-#' full sort/filter operations; setting either option to a finite value restores
-#' the corresponding `limit_exceeded` guard. Page, work, cache, and query-row
-#' settings are captured when a Paged holder is registered; re-register the
-#' table to apply changed options. Each open Paged view separately retains its
-#' latest filtered/sorted row index outside `jdv.max_cache_bytes`, allowing
-#' consecutive pages for that query to reuse the index. A different query or
-#' unfiltered page releases the latest-index slot; an older result may remain in
-#' the LRU index cache. Clearing query caches, replacing the view generation, or
-#' closing the view releases both the slot and caches. This adds at most one
-#' potentially large result index per open Paged view; the 32 MiB default
-#' remains the budget for the LRU caches, including older result indices.
+#' and `jdv.max_query_rows` (default `Inf`). `jdv.resources` (default `TRUE`)
+#' enables the resource tree for a session (see R producer extension: Resource
+#' trees). The work and row limits apply to full sort/filter operations; setting
+#' either option to a finite value restores the corresponding `limit_exceeded`
+#' guard. Page, work, cache, and query-row settings are captured when a Paged
+#' holder is registered; re-register the table to apply changed options. Each
+#' open Paged view separately retains its latest filtered/sorted row index
+#' outside `jdv.max_cache_bytes`, allowing consecutive pages for that query to
+#' reuse the index. A different query or unfiltered page releases the
+#' latest-index slot; an older result may remain in the LRU index cache.
+#' Clearing query caches, replacing the view generation, or closing the view
+#' releases both the slot and caches. This adds at most one potentially large
+#' result index per open Paged view; the 32 MiB default remains the budget for
+#' the LRU caches, including older result indices.
 #'
 #' `mode = "auto"` selects Snapshot only when both the cell estimate
 #' `nrow * max(1, ncol)` and a deterministic byte estimate fit their thresholds.

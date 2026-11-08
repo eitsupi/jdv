@@ -225,6 +225,17 @@ test_that("terminal stream errors release once and retain the failure reason", {
   expect_identical(state$released, 1L)
 })
 
+test_that("a display-only title never takes a title slot", {
+  sequential_fixture()
+  on.exit(.jdv_close_internal(notify = FALSE), add = TRUE)
+  held <- .jdv_sequential_register(NULL, title = "stream")
+  first <- .jdv_sequential_register(NULL, title = "stream", title_slot = FALSE)
+  second <- .jdv_sequential_register(NULL, title = "stream", title_slot = FALSE)
+  expect_false(first$id %in% c(held$id, second$id))
+  expect_true(exists(held$id, envir = .jdv_state$entries))
+  expect_identical(.jdv_json_parse(second$open)$params$title, "stream")
+})
+
 test_that("replacement, eviction and deferred release follow view lifetime", {
   state <- sequential_fixture()
   on.exit(.jdv_close_internal(notify = FALSE), add = TRUE)

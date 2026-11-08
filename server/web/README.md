@@ -53,3 +53,38 @@ then asks the host page cache for an evicted page when that capability is
 available. If neither cache retains the page, inspection reports that state
 without advancing the R stream. Only the active inspected page is decoded for
 the tree view, and closing or leaving the inspector releases that tree handle.
+
+The Resource Tree explorer is implemented in `app.js` with its bookkeeping in
+`resource_tree.js`, which has no DOM dependency so unit tests can exercise it.
+It appears only for sessions whose `hello` declared
+`capabilities.resources: true` and renders one explorer per session in the
+`#resources` section, independently of the selected view. The section sits in
+`#resources-panel`, a `<details>` element: on windows at least 900px wide it is
+a sticky sidebar column (the summary is hidden and the panel is forced open)
+that scrolls on its own, and below that width it is a collapsible panel above
+the viewer with a limited height. The panel is hidden, and the layout returns to
+one column, while no session has an explorer. Each node record is keyed by its
+path (the ids from the root), so a node listed under two parents has two
+records. A record keeps the expansion state, the children fetched so far, the
+next offset, and a browser-local fetch generation that discards responses made
+obsolete by a refresh or a collapse. A refresh reads a node's pages again as a
+sweep and swaps the new listing in at the end; records are discarded only when a
+listing read to its last page no longer contains the node. The `hidden` field
+alone decides whether a node is hidden by default. Row text (label, class names,
+summary, unavailable reason) is built with the same helpers as the Object Tree
+and always set through `textContent`.
+
+When the session also declared `capabilities.resource_changes: true`, the
+explorer sends `resources/subscribe` before its first listing and refreshes
+itself on `resources/changed`. The notice sets `dirty` on the explorer state and
+nothing more, so a run of notices cannot cancel a refresh that is in progress.
+`refreshDue` is true when `dirty` is set and no fetch is in flight; `app.js`
+checks it whenever a fetch completes, when a node is collapsed, and when the
+folded panel is opened, and starts the same refresh as the manual Refresh.
+`refreshAll` clears `dirty` when it starts, so a notice received during the
+refresh makes one more (trailing) refresh start after the last fetch of the
+current one completes. A failed fetch clears `dirty` and is not retried until
+the next notice or a manual Refresh. Collapsed nodes are only marked stale and
+are fetched again on expansion. If the subscription fails, the session's detail
+line says that automatic updates are unavailable and the manual Refresh keeps
+working.

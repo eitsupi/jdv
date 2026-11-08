@@ -280,7 +280,11 @@ local({
     expect_identical(received$hello$method, "hello")
     expect_setequal(
       names(received$hello$params),
-      c("protocol", "session", "producer", "wake", "limits")
+      c("protocol", "session", "producer", "wake", "capabilities", "limits")
+    )
+    expect_identical(
+      received$hello$params$capabilities,
+      list(resources = TRUE, resource_changes = TRUE)
     )
     expect_identical(received$hello$params$producer$name, "jdv")
     expect_identical(
@@ -1825,6 +1829,55 @@ local({
       lifecycle_messages(host, 4L),
       c("hello", "view/open", "view/open", "view/open")
     )
+  })
+
+  test_that("resource changes reach the transport and merge until sent", {
+    host <- lifecycle_host()
+    on.exit(host$cleanup(), add = TRUE)
+    expect_true(host$wait_ready())
+    jdv_connect()
+    expect_identical(lifecycle_messages(host, 1L), "hello")
+    response <- .jdv_json_parse(jdv_rpc(.jdv_json_encode(list(
+      id = "sub-1",
+      method = "resources/subscribe",
+      params = list(enabled = TRUE)
+    ))))
+    expect_true(response$result$enabled)
+    on.exit(
+      suppressWarnings(rm(
+        list = c("jdvtrans_a", "jdvtrans_b"),
+        envir = globalenv()
+      )),
+      add = TRUE
+    )
+
+    assign("jdvtrans_a", 1, envir = globalenv())
+    jdv_rpc(NULL)
+    expect_identical(
+      lifecycle_messages(host, 2L),
+      c("hello", "resources/changed")
+    )
+    expect_false(.jdv_state$res_pending)
+
+    # An unchanged listing sends nothing; a later change is sent again.
+    jdv_rpc(NULL)
+    assign("jdvtrans_b", 1, envir = globalenv())
+    jdv_rpc(NULL)
+    expect_identical(
+      lifecycle_messages(host, 3L),
+      c("hello", "resources/changed", "resources/changed")
+    )
+
+    # While one is queued and not yet sent, more changes add nothing.
+    .jdv_state$res_pending <- FALSE
+    .jdv_resources_notify_changed()
+    for (i in 1:300) {
+      expect_false(.jdv_resources_notify_changed())
+    }
+    expect_length(.jdv_state$queue, 1L)
+    jdv_disconnect()
+    expect_false(.jdv_state$res_subscribed)
+    expect_false(.jdv_state$res_pending)
   })
 
   test_that(

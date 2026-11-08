@@ -135,6 +135,19 @@ controls. The UI always sends the original R row index after sorting, filtering,
 or paging. The view breadcrumb restores the parent's query, page, and horizontal
 scroll, or its object path and child-page offset.
 
+The Resource Tree explorer of a session that declares
+`capabilities.resource_changes` updates itself. The browser sends
+`resources/subscribe` before the first listing, so a change between the listing
+and the subscription cannot be missed; if the subscription fails, the explorer
+notes that automatic updates are unavailable and keeps working with the manual
+Refresh. A `resources/changed` notice only marks the explorer as changed. A
+refresh that is running is never cancelled by notices, and when it ends with a
+change still pending, one more refresh follows. A refresh reads the loaded page
+ranges and the expanded children again, keeps the expansion state, scroll
+position, and hidden setting, and is not retried when it fails. Collapsed nodes
+are fetched when they are next expanded, and a folded explorer panel is
+refreshed when it is opened.
+
 A child open waiting for R is shown separately from page loading. Snapshot sort,
 filter, and page changes keep working without canceling that original cell
 request. Its child opens automatically when R handles it at the prompt, provided
@@ -149,6 +162,53 @@ both modes. The R request contract can interpret offset-free datetimes using the
 session timezone, but the viewer applies the same explicit input rule to
 Snapshot and Paged tables because it cannot infer that timezone from a cached
 Snapshot.
+
+### Resource Tree explorer
+
+A session whose `hello` declared `capabilities.resources: true` gets an
+explorer. On windows at least 900px wide the explorer is a sidebar: a
+fixed-width column on the left that scrolls on its own and fits the window
+height, so a long listing never moves the session list, the view list, or the
+viewer, which stay in the main column. On narrower windows it is a collapsible
+panel (open by default) above the viewer with a limited height and its own
+scrolling. When no session declared the capability there is no sidebar and the
+page keeps its single full-width column. The explorer is shown whether or not a
+view is selected, and a session without views still has one, including a session
+that was already connected when the page loaded. A session that did not declare
+the capability shows nothing extra. The explorer lists the root with
+`resources/children` when the session appears and fetches the children of a node
+only when the user expands it. Several nodes can stay expanded at once.
+`Load more` requests the next page at the announced `next_offset`, so a page
+that holds only hidden nodes still offers the next one. Entries with an id
+already listed under the same parent since the last fetch from offset 0 are
+dropped as duplicates; entries without an id are never treated as duplicates.
+
+Nodes with `hidden: true` are not shown until the `Show hidden` toggle is
+checked. Only that field decides; labels such as a leading `.` are not
+inspected, and the toggle filters what was already fetched without a new
+request. `Open` is offered for `viewable` nodes and sends `resources/open`; the
+resulting view is the one the producer registered with `view/open` (reason
+`resource`), shown in the grid or tree viewer, and the response is used only to
+find it. The button stays disabled while the request is in flight and a failed
+open is not retried. Views opened this way have a `Close view` button in the
+view list; closing one leaves the explorer unchanged. A node with `unavailable`
+shows that token and cannot be expanded or opened. `kind` selects a short
+symbol, and an unrecognized token is shown as `unknown`.
+
+`Refresh` fetches the root and every visible expanded node again from offset 0
+and keeps expansion and open views. A node that had several pages loaded is read
+again page by page until it covers what was loaded before and every expanded
+child has been found again (or the listing ends); the old listing stays on
+screen until then. Nodes under a collapsed parent are fetched again when they
+are next expanded. The browser tags each fetch with a local counter, unrelated
+to a view generation; a response from before a refresh or a collapse is
+discarded. When the session closes, the explorer and its requests are discarded.
+
+UI state (expansion, loaded pages, paging) is kept per path, the list of node
+ids from the root, so a node that the producer lists under two parents has
+independent state under each. The state of a node is discarded only when its
+parent's listing has been read to the end (`next_offset` null) and the node is
+not in it; reading only some pages never discards anything.
 
 ### Nested Arrow cells
 
@@ -254,6 +314,73 @@ notification only while `generation` is the one it holds. The bundled viewer
 shows the state next to the Refresh button and offers a pause and resume toggle
 while following is not lost.
 
+The server also accepts the optional resource tree requests `resources/children`
+and `resources/open`. They are session scope requests: `params` carries no
+`view` or `generation`, so they work while a session has no views, and closing a
+view or moving it to a new generation never cancels them. They end with the
+requesting client (disconnect or `cancel`), a timeout, or the session, and they
+use the same request, queue, byte, ACK, wake, deadline, and cancellation limits
+as view requests, including the 32 active request cap. A session accepts them
+only when its `hello` declared `capabilities.resources: true`; otherwise the
+server answers `unsupported` without contacting the producer, while an unknown
+method still gets `method_not_found`. `resources/children` takes an optional
+`node` (omitted, `null`, or a non-empty id of at most 16,384 UTF-8 bytes), a
+non-negative safe integer `offset`, and an integer `limit` from 1 through 500;
+other values return `invalid_request`. `resources/open` requires a node id. The
+server checks a successful `resources/children` result: `node` and `offset` must
+repeat the request, `children` must be an array of at most `limit` entries,
+`total_children` must be a non-negative safe integer or `null`, and
+`next_offset` must be `null` or equal `offset` plus a non-empty page length. A
+mismatch, or any binary body, becomes an `invalid_request` error. A
+`resources/open` view is registered from the producer's `view/open`
+notification, which arrives before the response; the response alone never
+creates a view. Unsent `resources/children` requests are replaced only by a
+request from the same client for the same session, node, and offset, so a
+request for another page stays queued. `resources/open` is never coalesced
+because every open creates a new view.
+
+A producer that declares `capabilities.resource_changes: true` (which requires
+`resources: true`; a hello that declares it without `resources`, or with a
+non-Boolean value, is rejected) can announce that its resource tree may have
+changed. A browser sends the session scope request `resources/subscribe` with
+`params: {"enabled": <Boolean>}` and no other member; the result is
+`{"enabled": <Boolean>}`. A session without the capability answers `unsupported`
+without contacting the producer. A client has at most one such request active at
+a time (another gets `busy`), and it uses the same request, queue, byte, ACK,
+wake, and deadline limits as the other session requests. The hub owns the
+subscription wishes of the browsers and keeps one producer-side subscription for
+the session:
+
+- The first subscriber makes the hub send `resources/subscribe` with
+  `enabled: true` to the producer, and the client gets its success only after
+  the producer succeeded. When the producer is already subscribed, the client is
+  answered without a producer request. A client that subscribes while the
+  producer is being changed waits for that request.
+- An unsubscribe takes effect for the client at once. When the last subscriber
+  leaves, by unsubscribing or by disconnecting, the hub sends `enabled: false`.
+  One client leaving never stops another one.
+- Only one producer request is outstanding. The hub compares what the clients
+  want with what the producer is known to be doing and sends the next request
+  when they differ, so a disconnect, `cancel`, or timeout while a request runs
+  is undone after it ends. A `cancel` or timeout of a subscribe withdraws that
+  client's wish, but a `cancel` or timeout of an unsubscribe only ends the wait
+  and the client stays unsubscribed. A producer request that times out leaves
+  the producer state unknown, and the hub then asks for the state it wants.
+- A producer error is returned to the clients waiting for that request and the
+  known producer state does not change. The hub does not retry on its own; the
+  next subscribe or unsubscribe starts a new request.
+- The subscription ends with the session, and it is not part of `welcome`.
+
+The producer's `resources/changed` notification is checked (the capability was
+declared and `params` is an object; unknown members are ignored) and is sent
+only to the clients whose subscribe succeeded, as
+`{"type": "notification", "session": <id>, "message": {"method":
+"resources/changed", "params": {}}}`.
+It is dropped when nobody is subscribed or the notification is malformed, and it
+never takes the generic notification path. It carries no view or generation and
+is neither stored nor replayed, so a client lists the tree after its subscribe
+succeeds and again when it receives the notification.
+
 Browser WebSocket input frames are limited to 64 KiB. Incoming producer JSONL
 frames are limited to 10 MiB.
 
@@ -265,7 +392,10 @@ with `in_use` while the connected session stays active.
 
 The hello must include positive safe integer limits for `max_unacked_frames`,
 `max_unacked_bytes`, `queue_messages`, `queue_bytes`, `max_request_bytes`, and
-`max_message_bytes`. `wake` is an optional boolean that defaults to `false`; the
+`max_message_bytes`. `capabilities` is an optional object of Boolean session
+features; the only one the server uses is `resources`. A non-object
+`capabilities` or a non-Boolean `resources` rejects the hello, and unknown
+members are ignored. `wake` is an optional boolean that defaults to `false`; the
 host sends periodic `wake` notifications only when it is `true`. The host clamps
 its unacknowledged wire window to 128 frames and 512 KiB, with up to 32 frames
 and 16 KiB reserved for cancellation while preserving ordinary capacity under
@@ -301,12 +431,18 @@ mise exec -- deno task check
 mise exec -- deno task test:unit
 ```
 
-The configuration pins Deno 2.9.7 and arf 0.6.0. In a shell with mise activated,
-`deno task` uses the same pinned tools without the `mise exec --` prefix. The
-repository `deno.json` defines the task split, a test-only Astral import alias,
-and exclusions for formatting the vendored Tabulator and Arrow bundles. Test and
-type-check tasks enforce the committed `deno.lock`. The host uses relative
-imports, so URL startup remains self-contained with `--no-config`.
+The configuration pins Deno 2.9.7 and arf 0.7.0-beta.2. In a shell with mise
+activated, `deno task` uses the same pinned tools without the `mise exec --`
+prefix. The repository `deno.json` defines the task split, a test-only Astral
+import alias, and exclusions for formatting the vendored Tabulator and Arrow
+bundles. Test and type-check tasks enforce the committed `deno.lock`. The host
+uses relative imports, so URL startup remains self-contained with `--no-config`.
+
+The arf test helper evaluates silently by default, which returns values but does
+not run R task callbacks. Checks that depend on variable tracking use
+`evalVisible()`, which runs through R's normal REPL (`arf ipc eval --visible`,
+available since arf 0.7.0-beta.1) so the callbacks fire; its response has no
+`value` or `error`.
 
 `test:unit` lists only Deno tests that need no R, arf, or Chromium. R numeric
 and query fixtures, installed-package integration, interactive transport, Arrow
@@ -317,9 +453,14 @@ TCP server. Where the headless console remains in a framed `browser()` wait, the
 test keeps console input open to continue the frame. It also checks request
 progress while an R function is sleeping, without manual RPC polling.
 
-On Windows, arf's headless console currently returns EOF from `browser()`, so
-the interactive regression holds R with a function-scoped `Sys.sleep()` there
-instead. Holding a Windows `browser()` prompt is not yet tested.
+With arf 0.7.0, the headless console returns EOF from `browser()` on every
+platform (earlier versions did so only on Windows), so the interactive
+regression holds R with a function-scoped `Sys.sleep()` instead. On every
+platform the test checks, from the frame depth at `browser()` and the completion
+marker, that `browser()` returned on its own without console input or an error.
+That shows the frame did not hold; it does not prove that the read ended with an
+EOF. arf's `no callback set` log line is only reported, not required. Holding a
+`browser()` prompt is not yet tested.
 
 For the integration task, install jdv into a scratch library and install the
 optional R packages arrow, nanoarrow, jsonlite, bit64, and polars. Set

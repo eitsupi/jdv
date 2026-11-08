@@ -412,7 +412,7 @@ Deno.test({
       const env = Deno.env.toObject();
       env.XDG_CACHE_HOME = cacheRoot;
       env.JDV_ADDRESS = `tcp://127.0.0.1:${proxyPort}`;
-      // The Windows console EOF diagnostic is emitted at the sys module's
+      // The console EOF diagnostic is emitted at the sys module's
       // debug level. Keep that evidence enabled for this test session.
       env.RUST_LOG ??= "arf_libr::sys=debug";
       if (testLibrary) env.R_LIBS_USER = testLibrary;
@@ -657,8 +657,12 @@ Deno.test({
           "no callback set, returning 0",
           2_000,
         );
+        // This checks that browser() was entered in a function frame and
+        // returned without console input and without an error. It shows that
+        // the frame did not hold, not that the cause was a console EOF. The arf
+        // log line is auxiliary: it is reported but not required, because arf
+        // 0.7.0 ends the nested read without it on every platform.
         const browserEofEvidence = {
-          os: Deno.build.os,
           browserStartedMarker,
           browserStartFrameDepth,
           browserDone,
@@ -666,8 +670,8 @@ Deno.test({
           eofLogWasNew: eofLog.found,
         };
         assert(
-          isConfirmedWindowsBrowserEof(browserEofEvidence),
-          `The browser evaluation returned before console continuation, but the Windows arf EOF evidence was incomplete: ${
+          isConfirmedBrowserEof(browserEofEvidence),
+          `The browser evaluation returned before console continuation, but the evidence that browser() returned on its own was incomplete: ${
             JSON.stringify({
               ...browserEofEvidence,
               browserLog: eofLog.contents,
@@ -675,8 +679,8 @@ Deno.test({
           }.`,
         );
         // TODO: arf headless does not register a ReadConsole callback, so
-        // browser input returns EOF (confirmed in v0.6.0 through
-        // v0.7.0-alpha.1). Restore browser()-held verification on Windows
+        // browser input returns EOF (confirmed on Windows in v0.6.0 through
+        // v0.7.0-alpha.1, and on every platform since v0.7.0-beta.2). Restore browser()-held verification
         // once arf fixes this.
         heldKind = "sleep-frame";
         const sleepHoldMarkers = await markerPath();
@@ -730,7 +734,7 @@ Deno.test({
         heldRowsId = "interactive-sleep-frame-rows";
         heldRowOffset = 2;
         console.log(
-          `interactive regression: Windows arf browser EOF confirmed by a new log entry; browser hold is not treated as validated; function-scoped Sys.sleep frame depth ${sleepStartFrameDepth} is used for the transport hold`,
+          `interactive regression: browser() returned without console input (new arf EOF log entry: ${eofLog.found}); browser hold is not treated as validated; function-scoped Sys.sleep frame depth ${sleepStartFrameDepth} is used for the transport hold`,
         );
       } else {
         assert(
@@ -1201,9 +1205,8 @@ Deno.test("RawWebSocket answers ping frames and keeps reading text messages", as
   }
 });
 
-Deno.test("Windows arf browser EOF requires the full observed evidence", () => {
+Deno.test("a browser() return without input requires the full observed evidence", () => {
   const evidence: BrowserEofEvidence = {
-    os: "windows",
     browserStartedMarker: "BROWSER_STARTED:2",
     browserStartFrameDepth: 2,
     browserDone: true,
@@ -1211,31 +1214,31 @@ Deno.test("Windows arf browser EOF requires the full observed evidence", () => {
     eofLogWasNew: true,
   };
   assert(
-    isConfirmedWindowsBrowserEof(evidence),
-    "The complete Windows browser EOF evidence was rejected.",
+    isConfirmedBrowserEof(evidence),
+    "The complete browser EOF evidence was rejected.",
   );
   assert(
-    !isConfirmedWindowsBrowserEof({ ...evidence, os: "linux" }),
-    "The Windows EOF fixture was incorrectly enabled on Linux.",
+    !isConfirmedBrowserEof({ ...evidence, browserDone: false }),
+    "The browser EOF fixture accepted a missing completion marker.",
   );
   assert(
-    !isConfirmedWindowsBrowserEof({ ...evidence, browserDone: false }),
-    "The Windows EOF fixture accepted a missing completion marker.",
+    !isConfirmedBrowserEof({ ...evidence, browserStartFrameDepth: 0 }),
+    "The browser EOF fixture accepted a missing function frame.",
   );
   assert(
-    !isConfirmedWindowsBrowserEof({ ...evidence, browserStartFrameDepth: 0 }),
-    "The Windows EOF fixture accepted a missing function frame.",
-  );
-  assert(
-    !isConfirmedWindowsBrowserEof({
+    !isConfirmedBrowserEof({
       ...evidence,
       browserEvaluationError: "R evaluation failed",
     }),
-    "The Windows EOF fixture accepted a failed R evaluation.",
+    "The browser EOF fixture accepted a failed R evaluation.",
   );
   assert(
-    !isConfirmedWindowsBrowserEof({ ...evidence, eofLogWasNew: false }),
-    "The Windows EOF fixture accepted an old or absent EOF log entry.",
+    isConfirmedBrowserEof({ ...evidence, eofLogWasNew: false }),
+    "The browser EOF fixture required the optional arf log entry.",
+  );
+  assert(
+    isConfirmedBrowserEof(evidence),
+    "The browser EOF fixture rejected evidence that includes the log entry.",
   );
 });
 
@@ -1324,20 +1327,23 @@ function delay(milliseconds: number): Promise<void> {
 type MarkerObservation = { time: number } | { error: unknown };
 
 interface BrowserEofEvidence {
-  os: string;
   browserStartedMarker: string;
   browserStartFrameDepth: number;
   browserDone: boolean;
   browserEvaluationError: string | null;
+  // Auxiliary: arf may or may not log the EOF, depending on version and
+  // platform, so it never decides the outcome.
   eofLogWasNew: boolean;
 }
 
-function isConfirmedWindowsBrowserEof(evidence: BrowserEofEvidence): boolean {
-  return evidence.os === "windows" &&
-    evidence.browserStartedMarker.startsWith("BROWSER_STARTED:") &&
+// Whether browser() was entered in a function frame and returned on its own,
+// without console input or an error. This is what the test can observe; it
+// does not distinguish a console EOF from another reason the read ended.
+function isConfirmedBrowserEof(evidence: BrowserEofEvidence): boolean {
+  return evidence.browserStartedMarker.startsWith("BROWSER_STARTED:") &&
     Number.isSafeInteger(evidence.browserStartFrameDepth) &&
     evidence.browserStartFrameDepth > 0 && evidence.browserDone &&
-    evidence.browserEvaluationError === null && evidence.eofLogWasNew;
+    evidence.browserEvaluationError === null;
 }
 
 async function settleWithin<T>(

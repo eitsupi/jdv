@@ -23,9 +23,14 @@
   state$transport_close_reason <- NULL
   state$last_disconnect_reason <- NULL
   state$session_counter <- 0L
+  state$resources <- FALSE
   state$transport_task_callback <- NULL
   state$track_task_callback <- NULL
   state$tracking <- FALSE
+  state$res_subscribed <- FALSE
+  state$res_baseline <- NULL
+  state$res_pending <- FALSE
+  state$res_polling <- FALSE
   state$unloading <- FALSE
   state
 })
@@ -181,6 +186,8 @@ jdv_abort <- function(code, message) stop(jdv_condition(code, message))
 .jdv_queue_reset <- function(limits = NULL) {
   .jdv_state$queue <- list()
   .jdv_state$queue_bytes <- 0
+  # Whatever was queued is gone, so a resources/changed is no longer pending.
+  .jdv_state$res_pending <- FALSE
   if (!is.null(limits)) {
     .jdv_state$queue_max_messages <- limits$messages
     .jdv_state$queue_max_bytes <- limits$bytes
@@ -230,6 +237,7 @@ jdv_abort <- function(code, message) stop(jdv_condition(code, message))
 .jdv_session_overflow <- function() {
   .jdv_queue_reset()
   .jdv_close_internal(notify = FALSE)
+  .jdv_resources_release()
   if (identical(.jdv_session_owner(), "transport")) {
     # The disconnect callback records the reason once cleanup runs.
     .jdv_transport_close("notification_overflow")
@@ -279,6 +287,7 @@ jdv_abort <- function(code, message) stop(jdv_condition(code, message))
     error = function(error) {
       .jdv_state$embedded <- FALSE
       .jdv_queue_reset()
+      .jdv_resources_release()
       stop(error)
     }
   )
@@ -294,6 +303,7 @@ jdv_abort <- function(code, message) stop(jdv_condition(code, message))
   ) {
     .jdv_state$embedded <- FALSE
     .jdv_queue_reset()
+    .jdv_resources_release()
   }
   invisible(NULL)
 }
@@ -1000,7 +1010,8 @@ jdv_register <- function(
   collation,
   emit = TRUE,
   reason = "register",
-  tracking = NULL
+  tracking = NULL,
+  title_slot = TRUE
 ) {
   .jdv_assert_active()
   .jdv_assert_not_refreshing()
@@ -1019,9 +1030,20 @@ jdv_register <- function(
   source <- jdv_source(x)
   x <- source$data
   registered <- if (identical(source$kind, "tree")) {
-    .jdv_tree_register(x, title = title, reason = reason, tracking = tracking)
+    .jdv_tree_register(
+      x,
+      title = title,
+      reason = reason,
+      tracking = tracking,
+      title_slot = title_slot
+    )
   } else if (identical(source$access, "sequential")) {
-    .jdv_sequential_register(x, title = title, reason = reason)
+    .jdv_sequential_register(
+      x,
+      title = title,
+      reason = reason,
+      title_slot = title_slot
+    )
   } else {
     .jdv_grid_register(
       x,
@@ -1030,7 +1052,8 @@ jdv_register <- function(
       collation,
       collation_intent,
       reason,
-      tracking
+      tracking,
+      title_slot
     )
   }
   if (emit) {
@@ -1123,7 +1146,8 @@ jdv_register <- function(
   collation,
   collation_intent = collation,
   reason = "register",
-  tracking = NULL
+  tracking = NULL,
+  title_slot = TRUE
 ) {
   if (!is.null(title)) {
     title <- query_string(title, 4096L)
@@ -1134,7 +1158,11 @@ jdv_register <- function(
   limits <- built$limits
   max_message <- built$max_message
   .jdv_assert_active()
-  title_key <- if (is.null(title)) NULL else .jdv_title_key(title)
+  title_key <- if (is.null(title) || !title_slot) {
+    NULL
+  } else {
+    .jdv_title_key(title)
+  }
   previous <- if (
     !is.null(title_key) &&
       exists(title_key, envir = .jdv_state$titles, inherits = FALSE)
@@ -1567,6 +1595,12 @@ jdv_register <- function(
     )
   }
   params <- request$params
+  if (startsWith(method, "resources/")) {
+    if (!method %in% .jdv_resource_methods) {
+      query_error("method_not_found", "Unknown RPC method.")
+    }
+    return(.jdv_resources_request(method, params))
+  }
   if (method == "stream/next") {
     .jdv_fields(
       params,
@@ -1867,9 +1901,10 @@ jdv_rpc <- function(request = NULL) {
       .Call(C_jdv_transport_poll)
       .jdv_assert_active()
     }
-    # Tracked bindings are checked here too, so an embedding host that runs
-    # its own task callback can take the updates right after this call.
-    .jdv_track_poll()
+    # Tracked bindings and the resource tree are checked here too, so an
+    # embedding host that runs its own task callback can take the updates right
+    # after this call.
+    .jdv_watch_signal(.jdv_watch_poll())
     .jdv_assert_active()
     return(invisible(NULL))
   }
@@ -2047,6 +2082,41 @@ jdv_rpc <- function(request = NULL) {
       encoded <- encode_response(response)
       if (!inherits(encoded, "error")) {
         return(encoded)
+      }
+      if (
+        !inherits(encoded, "jdv_query_error") ||
+          encoded$code != "limit_exceeded"
+      ) {
+        break
+      }
+    }
+  }
+  if (
+    inherits(encoded, "jdv_query_error") &&
+      encoded$code == "limit_exceeded" &&
+      !inherits(result, "error") &&
+      identical(parsed$method, "resources/children") &&
+      is.list(result) &&
+      length(result$children) > 1L
+  ) {
+    # A short page is allowed: next_offset says where the listing continues.
+    count <- length(result$children)
+    while (count > 1L) {
+      count <- max(1L, count %/% 2L)
+      response <- .jdv_response(
+        request_id,
+        result = .jdv_resources_trim_page(result, count),
+        warnings = warnings
+      )
+      if (warning_count > length(warnings)) {
+        response$warnings <- .jdv_json_values(c(
+          warnings,
+          "Additional warnings were omitted."
+        ))
+      }
+      encoded <- encode_response(response)
+      if (!inherits(encoded, "error")) {
+        break
       }
       if (
         !inherits(encoded, "jdv_query_error") ||

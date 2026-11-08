@@ -33,6 +33,108 @@ async function arrow(): Promise<Record<string, (...args: never[]) => unknown>> {
   return await arrowPromise;
 }
 
+export interface FixtureOptions {
+  // Declares hello capabilities. `resources: true` also enables the fixture's
+  // Resource Tree handling, and `resource_changes: true` its handling of
+  // `resources/subscribe`.
+  capabilities?: Json;
+}
+
+// A node of the fixture Resource Tree.
+interface FixtureNode {
+  id: string;
+  label: string;
+  kind: string;
+  summary?: string;
+  has_children: boolean;
+  viewable: boolean;
+  hidden?: boolean;
+  unavailable?: string;
+}
+
+export const FIXTURE_TABLE_COUNT = 250;
+
+/** Children of the fixture Resource Tree, keyed by parent node id. */
+function fixtureChildren(node: string | null): FixtureNode[] | undefined {
+  if (node === null) {
+    return [
+      container("c:main", "main", "catalog", true),
+      { ...container("c:temp", "temp", "catalog", false), hidden: true },
+      {
+        id: "c:locked",
+        label: "locked",
+        kind: "container",
+        has_children: false,
+        viewable: false,
+        unavailable: "permission_denied",
+      },
+    ];
+  }
+  if (node === "c:main") {
+    return [
+      container("s:main.public", "public", "container", true),
+      container("s:main.empty", "empty", "container", false),
+    ];
+  }
+  if (node === "c:temp" || node === "s:main.empty") return [];
+  if (node === "s:main.public") {
+    return Array.from({ length: FIXTURE_TABLE_COUNT }, (_, index) => {
+      const name = `table_${String(index).padStart(3, "0")}`;
+      const base: FixtureNode = {
+        id: `t:public.${name}`,
+        label: name,
+        kind: "table",
+        summary: "table, 1 column",
+        has_children: false,
+        viewable: true,
+      };
+      if (index === 7) return { ...base, hidden: true };
+      if (index === 8) {
+        return { ...base, viewable: false, unavailable: "stale" };
+      }
+      return base;
+    });
+  }
+  return undefined;
+}
+
+function container(
+  id: string,
+  label: string,
+  kind: string,
+  hasChildren: boolean,
+): FixtureNode {
+  return {
+    id,
+    label,
+    kind,
+    has_children: hasChildren,
+    viewable: false,
+  };
+}
+
+function fixtureNodeExists(
+  id: string,
+  extraRoot: FixtureNode[] = [],
+): FixtureNode | undefined {
+  if (id === "c:locked") {
+    return fixtureChildren(null)!.find((node) => node.id === id);
+  }
+  const extra = extraRoot.find((node) => node.id === id);
+  if (extra) return extra;
+  for (
+    const parent of [
+      null,
+      "c:main",
+      "s:main.public",
+    ]
+  ) {
+    const found = fixtureChildren(parent)!.find((node) => node.id === id);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 export class NonRProducerHarness {
   readonly url: string;
   readonly producer: FixtureProducer;
@@ -53,7 +155,9 @@ export class NonRProducerHarness {
     this.#socketPath = socketPath;
   }
 
-  static async start(): Promise<NonRProducerHarness> {
+  static async start(
+    options: FixtureOptions = {},
+  ): Promise<NonRProducerHarness> {
     const { startServer } = await import("../../main.ts");
     const cacheDir = await Deno.makeTempDir({ prefix: "jdv-nonr-unit-" });
     const server = await startServer({ mode: "tcp", httpPort: 0, cacheDir });
@@ -62,7 +166,7 @@ export class NonRProducerHarness {
       hostname: address.hostname,
       port: Number(address.port),
     });
-    const producer = new FixtureProducer(connection);
+    const producer = new FixtureProducer(connection, options);
     const harness = new NonRProducerHarness(
       server,
       producer,
@@ -87,6 +191,18 @@ export class NonRProducerHarness {
   }
 
   async duplicateHello(): Promise<Json> {
+    return await this.#helloResponse(this.producer.session, undefined);
+  }
+
+  /** Sends a hello with the given capabilities value and returns the reply. */
+  async rejectedHello(capabilities: unknown): Promise<Json> {
+    return await this.#helloResponse(
+      `fixture.python:caps-${crypto.randomUUID()}`,
+      capabilities,
+    );
+  }
+
+  async #helloResponse(session: string, capabilities: unknown): Promise<Json> {
     const address = new URL(this.#socketPath);
     const connection = await Deno.connect({
       hostname: address.hostname,
@@ -99,8 +215,9 @@ export class NonRProducerHarness {
         method: "hello",
         params: {
           protocol: 1,
-          session: this.producer.session,
+          session,
           producer: { name: "compat-duplicate", version: "1.0.0" },
+          ...(capabilities === undefined ? {} : { capabilities }),
           limits,
         },
       })
@@ -115,7 +232,7 @@ export class NonRProducerHarness {
         const chunk = new Uint8Array(4096);
         const count = await connection.read(chunk);
         if (count === null) {
-          throw new Error("Duplicate hello socket closed without a response.");
+          throw new Error("Hello socket closed without a response.");
         }
         buffer = append(buffer, chunk.subarray(0, count));
         const newline = buffer.indexOf(10);
@@ -142,10 +259,67 @@ export class FixtureProducer {
   #nextId = 1;
   #closed = false;
   #holdNext = false;
+  #nextResourceView = 1;
+  readonly #options: FixtureOptions;
+  /** Resource requests received so far, in arrival order. */
+  readonly resourceRequests: { id: string; method: string; params: Json }[] =
+    [];
+  /**
+   * Replaces the built-in Resource Tree reply. Return true when the request was
+   * handled; the hook may call `respond` or `respondBinary` itself.
+   */
+  onResource:
+    | ((
+      request: { id: string; method: string; params: Json },
+    ) => boolean | Promise<boolean>)
+    | undefined;
   #buffer: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+  readonly #extraRoot: FixtureNode[] = [];
 
-  constructor(connection: Deno.Conn) {
+  /** Whether the fixture currently treats the session as subscribed. */
+  subscribed = false;
+
+  /** The `enabled` values of the `resources/subscribe` requests, in order. */
+  readonly subscribeRequests: boolean[] = [];
+
+  /**
+   * Sends `resources/changed` while subscribed. With `force`, it is sent even
+   * when unsubscribed, and `params` replaces the default empty object, so tests
+   * can send what a faulty producer would. Returns whether it was sent.
+   */
+  signalResourcesChanged(
+    options: { force?: boolean; params?: unknown } = {},
+  ): boolean {
+    if (!this.subscribed && !options.force) return false;
+    const frame: Json = { method: "resources/changed" };
+    if (!("params" in options)) frame.params = {};
+    else if (options.params !== undefined) frame.params = options.params;
+    void this.#send(frame);
+    return true;
+  }
+
+  /** Descriptor of the most recent view opened by `resources/open`. */
+  lastResourceDescriptor: Json | undefined;
+
+  /** Announces a newer generation of a view with another reason. */
+  reannounce(descriptor: Json, generation: number, reason: string): void {
+    this.#notify("view/open", { ...descriptor, generation, reason });
+  }
+
+  /** Adds a viewable table to the root listing, as if it appeared later. */
+  addRootTable(label: string): void {
+    this.#extraRoot.push({
+      id: `t:extra.${label}`,
+      label,
+      kind: "table",
+      has_children: false,
+      viewable: true,
+    });
+  }
+
+  constructor(connection: Deno.Conn, options: FixtureOptions = {}) {
     this.#connection = connection;
+    this.#options = options;
     this.#reader = this.#readLoop();
   }
 
@@ -156,6 +330,9 @@ export class FixtureProducer {
         protocol: 1,
         session: this.session,
         producer: { name: "compat-fixture", version: "1.0.0" },
+        ...(this.#options.capabilities
+          ? { capabilities: this.#options.capabilities }
+          : {}),
         limits,
       },
     });
@@ -273,6 +450,100 @@ export class FixtureProducer {
     ]);
   }
 
+  /** Sends a response frame, for tests that script resource replies. */
+  async respond(id: string, result?: Json, error?: Json): Promise<void> {
+    await this.#reply(id, result, error);
+  }
+
+  /** Sends a response followed by an Arrow-style opaque binary body. */
+  async respondBinary(id: string, result: Json, body: Uint8Array) {
+    await this.#sendBinary({ id, result, warnings: [] }, body);
+  }
+
+  async #handleResource(
+    method: string,
+    params: Json,
+    id: string,
+  ): Promise<void> {
+    const request = { id, method, params };
+    this.resourceRequests.push(request);
+    if (this.onResource && await this.onResource(request)) return;
+    if (method === "resources/subscribe") {
+      if (typeof params.enabled !== "boolean") {
+        await this.#reply(id, undefined, {
+          code: "invalid_request",
+          message: "enabled must be a Boolean.",
+        });
+        return;
+      }
+      this.subscribeRequests.push(params.enabled);
+      this.subscribed = params.enabled;
+      await this.#reply(id, { enabled: params.enabled });
+      return;
+    }
+    if (method === "resources/children") {
+      const node = params.node === undefined ? null : params.node;
+      const offset = Number(params.offset ?? 0);
+      const limit = Number(params.limit ?? 200);
+      const base = node === null || typeof node === "string"
+        ? fixtureChildren(node)
+        : undefined;
+      const all = base && node === null ? [...base, ...this.#extraRoot] : base;
+      if (!all) {
+        await this.#reply(id, undefined, {
+          code: "invalid_request",
+          message: "Unknown node id.",
+        });
+        return;
+      }
+      const children = all.slice(offset, offset + limit);
+      const end = offset + children.length;
+      await this.#reply(id, {
+        node,
+        offset,
+        children,
+        total_children: all.length,
+        next_offset: children.length > 0 && end < all.length ? end : null,
+      });
+      return;
+    }
+    if (method === "resources/open") {
+      const node = typeof params.node === "string"
+        ? fixtureNodeExists(params.node, this.#extraRoot)
+        : undefined;
+      if (!node) {
+        await this.#reply(id, undefined, {
+          code: "invalid_request",
+          message: "Unknown node id.",
+        });
+        return;
+      }
+      if (!node.viewable) {
+        await this.#reply(id, undefined, {
+          code: "unavailable",
+          message: "The node cannot be opened.",
+        });
+        return;
+      }
+      const view = `fixture-res-${this.#nextResourceView++}`;
+      // The view/open notification precedes the response.
+      const descriptor = this.#openJson(
+        "random",
+        view,
+        node.label,
+        [10, 20, 30],
+        "resource",
+      );
+      this.lastResourceDescriptor = descriptor;
+      await this.#reply(id, descriptor);
+      return;
+    }
+    await this.#reply(id, undefined, {
+      code: "method_not_found",
+      message: "Unknown fixture method.",
+    });
+  }
+
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
@@ -285,6 +556,7 @@ export class FixtureProducer {
     view: string,
     title: string,
     values: number[],
+    reason = "register",
   ): Json {
     const descriptor = {
       view,
@@ -293,7 +565,7 @@ export class FixtureProducer {
       access,
       encoding: "jdv-json",
       title,
-      reason: "register",
+      reason,
       collation: "C",
       nrow: values.length,
       ncol: 1,
@@ -343,7 +615,7 @@ export class FixtureProducer {
         const selected = values.slice(offset, offset + limit);
         await this.#reply(id, {
           view,
-          generation: 1,
+          generation: Number(params.generation ?? 1),
           total: values.length,
           total_unfiltered: values.length,
           offset,
@@ -364,13 +636,17 @@ export class FixtureProducer {
       } else if (method === "view/schema") {
         await this.#reply(id, {
           view,
-          generation: 1,
+          generation: Number(params.generation ?? 1),
           nrow: values.length,
           ncol: 1,
           columns: descriptor.columns,
         });
       } else if (method === "view/close") {
-        await this.#reply(id, { view, generation: 1, closed: true });
+        await this.#reply(id, {
+          view,
+          generation: Number(params.generation ?? 1),
+          closed: true,
+        });
       } else {
         await this.#reply(id, undefined, {
           code: "unsupported",
@@ -414,6 +690,16 @@ export class FixtureProducer {
         const method = String(frame.method ?? "");
         const params = isRecord(frame.params) ? frame.params : {};
         if (method === "wake" || method === "cancel") {
+          await this.#acknowledge();
+          continue;
+        }
+        if (
+          (method === "resources/children" || method === "resources/open" ||
+            (method === "resources/subscribe" &&
+              this.#options.capabilities?.resource_changes)) &&
+          typeof frame.id === "string" && this.#options.capabilities?.resources
+        ) {
+          await this.#handleResource(method, params, frame.id);
           await this.#acknowledge();
           continue;
         }

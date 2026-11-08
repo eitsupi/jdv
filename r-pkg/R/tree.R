@@ -660,6 +660,37 @@
   })
 }
 
+# Read one environment binding without evaluating it, through the same C path
+# as object paths and binding tracking. The status is value, forced, delayed,
+# active, missing, unbound, opaque, or error; only value and forced carry an
+# object.
+.jdv_tree_binding_read <- function(env, name) {
+  tryCatch(
+    .Call(C_jdv_tree_child, env, "binding", 0, name),
+    error = function(error) list(status = "error", value = NULL)
+  )
+}
+
+# The token that explains why a child read with `status` cannot be opened, or
+# NULL when the status carries an object.
+.jdv_tree_unavailable_token <- function(status, name_too_long = FALSE) {
+  if (identical(status, "value") || identical(status, "forced")) {
+    return(NULL)
+  }
+  switch(
+    status,
+    unavailable = if (name_too_long) "path_limit" else "unavailable",
+    delayed = "delayed_binding",
+    active = "active_binding",
+    missing = "missing_binding",
+    unbound = "unavailable",
+    s4_data_opaque = "opaque_data_slot",
+    promise = "promise",
+    error = "unavailable",
+    "unavailable"
+  )
+}
+
 .jdv_tree_list_children <- function(
   x,
   path,
@@ -732,24 +763,7 @@
         error = function(error) list(status = "error", value = NULL)
       )
     }
-    unavailable <- if (
-      identical(got$status, "value") || identical(got$status, "forced")
-    ) {
-      NULL
-    } else {
-      switch(
-        got$status,
-        unavailable = if (name_too_long) "path_limit" else "unavailable",
-        delayed = "delayed_binding",
-        active = "active_binding",
-        missing = "missing_binding",
-        unbound = "unavailable",
-        s4_data_opaque = "opaque_data_slot",
-        promise = "promise",
-        error = "unavailable",
-        "unavailable"
-      )
-    }
+    unavailable <- .jdv_tree_unavailable_token(got$status, name_too_long)
     child_value <- got$value
     child_info <- NULL
     cycle <- is.null(unavailable) &&
@@ -960,14 +974,16 @@
   title = NULL,
   parent = NULL,
   reason = "register",
-  tracking = NULL
+  tracking = NULL,
+  title_slot = TRUE
 ) {
   .jdv_assert_active()
   if (!is.null(title)) {
     title <- query_string(title, 4096L)
   }
-  # A child's title is a display name only; it never takes a title slot.
-  title_key <- if (is.null(title) || !is.null(parent)) {
+  # A child's title, or a title with `title_slot = FALSE`, is a display name
+  # only; it never takes a title slot.
+  title_key <- if (is.null(title) || !is.null(parent) || !title_slot) {
     NULL
   } else {
     .jdv_title_key(title)

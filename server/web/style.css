@@ -17,6 +17,107 @@ main {
   padding: 0 1.25rem 2rem;
 }
 
+/* The Resource Tree explorer sits in a sidebar on wide screens and in a
+   height-limited, collapsible panel above the viewer on narrow ones. Without
+   an explorer the workspace is a single full-width column. */
+.workspace {
+  display: block;
+  min-width: 0;
+}
+
+.workspace-main {
+  min-width: 0;
+}
+
+.resources-panel {
+  box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas);
+  border-radius: 0.5rem;
+  margin: 1.25rem 0;
+  padding: 0.25rem 0.75rem;
+}
+
+.resources-panel[hidden] {
+  display: none;
+}
+
+.resources-panel > summary {
+  cursor: pointer;
+  font-weight: 650;
+  padding: 0.35rem 0;
+}
+
+.resources-panel > #resources {
+  box-sizing: border-box;
+  max-height: min(40vh, 24rem);
+  overflow: auto;
+  margin: 0 0 0.5rem;
+}
+
+.resources-panel .resource-children .resource-children {
+  margin-left: 0.25rem;
+  padding-left: 0.5rem;
+}
+
+.resources-panel .resource-row {
+  gap: 0.35rem;
+}
+
+.resources-panel .resource-row button {
+  padding: 0.05rem 0.4rem;
+}
+
+.resources-panel .resource-explorer {
+  border: 0;
+  margin: 0;
+  padding: 0 0 0.5rem;
+}
+
+@media (min-width: 56.25rem) {
+  /* The sidebar takes the whole left column, header included, so it fits the
+     viewport from the top of the page; everything else moves to the right
+     column. The wrappers disappear from the grid so their children are laid
+     out directly. */
+  main:has(.workspace.has-sidebar) {
+    display: grid;
+    grid-template-columns: 24rem minmax(0, 1fr);
+    grid-template-rows: repeat(12, auto);
+    column-gap: 1.5rem;
+    align-content: start;
+    max-width: 96rem;
+  }
+
+  main:has(.workspace.has-sidebar) > header,
+  main:has(.workspace.has-sidebar) > #status,
+  .workspace.has-sidebar > .workspace-main > * {
+    grid-column: 2;
+  }
+
+  .workspace.has-sidebar,
+  .workspace.has-sidebar > .workspace-main {
+    display: contents;
+  }
+
+  .workspace.has-sidebar > .resources-panel {
+    grid-column: 1;
+    grid-row: 1 / -1;
+    align-self: start;
+    position: sticky;
+    top: 1rem;
+    margin: 0;
+  }
+
+  .workspace.has-sidebar > .resources-panel > summary {
+    display: none;
+  }
+
+  .workspace.has-sidebar > .resources-panel > #resources {
+    max-height: calc(100vh - 7rem);
+    margin: 0.5rem 0;
+    overflow: auto;
+  }
+}
+
 h1 {
   margin-bottom: 0;
 }
@@ -344,4 +445,94 @@ legend {
 
 .track-state {
   font-size: 0.85em;
+}
+
+/* Resource Tree explorer contents. */
+.resource-explorer .resource-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+/* The header stays pinned while the list below it scrolls. */
+.resource-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0.75rem;
+  background: Canvas;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, Canvas);
+}
+
+.resource-header h3,
+.resource-header p {
+  margin: 0;
+}
+
+.resource-header .resource-controls {
+  flex-basis: 100%;
+}
+
+.resource-header .resource-status {
+  flex-basis: 100%;
+}
+
+.resource-header .resource-status[hidden] {
+  display: none;
+}
+
+/* Scrolling a row into view must not leave it under the pinned header. */
+#resources {
+  scroll-padding-top: 6rem;
+}
+
+.resource-children {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+}
+
+.resource-children .resource-children {
+  border-left: 1px solid color-mix(in srgb, CanvasText 15%, Canvas);
+  margin-left: 0.6rem;
+  padding-left: 0.9rem;
+}
+
+.resource-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 10%, Canvas);
+  padding: 0.3rem 0.25rem;
+}
+
+.resource-toggle {
+  display: inline-block;
+  min-width: 1.75rem;
+}
+
+.resource-kind {
+  color: color-mix(in srgb, CanvasText 55%, Canvas);
+  display: inline-block;
+  min-width: 1.5rem;
+  text-align: center;
+}
+
+.resource-note[data-state="error"] {
+  color: #c43b3b;
+}
+
+.resource-status[data-state="error"] {
+  color: #c43b3b;
+}
+
+.resource-more,
+.resource-note {
+  padding: 0.3rem 0.25rem;
 }

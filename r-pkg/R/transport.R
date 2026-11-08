@@ -171,6 +171,7 @@
   }
   .jdv_close_internal(notify = FALSE)
   .jdv_queue_reset()
+  .jdv_resources_release()
   .jdv_state$transport <- NULL
   .jdv_state$transport_limits <- NULL
   .jdv_state$transport_hello <- FALSE
@@ -440,22 +441,27 @@
   invisible(NULL)
 }
 
+# The resource tree is enabled or disabled for the session when its hello is
+# created; changing `jdv.resources` later does not change a running session.
 .jdv_hello <- function(limits = .jdv_state$transport_limits) {
   .jdv_state$session_counter <- .jdv_state$session_counter + 1L
-  list(
-    method = "hello",
-    params = list(
-      protocol = 1L,
-      session = paste0("r-", Sys.getpid(), "-", .jdv_state$session_counter),
-      producer = list(
-        name = "jdv",
-        version = as.character(utils::packageVersion("jdv")),
-        runtime = list(name = "R", version = as.character(getRversion()))
-      ),
-      wake = TRUE,
-      limits = limits
-    )
+  .jdv_state$resources <- .jdv_resources_option()
+  .jdv_resources_release()
+  params <- list(
+    protocol = 1L,
+    session = paste0("r-", Sys.getpid(), "-", .jdv_state$session_counter),
+    producer = list(
+      name = "jdv",
+      version = as.character(utils::packageVersion("jdv")),
+      runtime = list(name = "R", version = as.character(getRversion()))
+    ),
+    wake = TRUE
   )
+  if (.jdv_state$resources) {
+    params$capabilities <- list(resources = TRUE, resource_changes = TRUE)
+  }
+  params$limits <- limits
+  list(method = "hello", params = params)
 }
 
 .jdv_transport_send <- function(messages) {
@@ -611,6 +617,7 @@ jdv_disconnect <- function() {
   # Release the registry now even if the native cleanup callback is deferred.
   .jdv_close_internal(notify = FALSE)
   .jdv_queue_reset()
+  .jdv_resources_release()
   if (isTRUE(.jdv_state$embedded) && is.null(.jdv_state$transport)) {
     .jdv_state$embedded <- FALSE
     .jdv_state$last_disconnect_reason <- "disconnect"

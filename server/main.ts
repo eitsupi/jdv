@@ -3,6 +3,7 @@ import page from "./web/index.html" with { type: "text" };
 import app from "./web/app.js" with { type: "text" };
 import arrowPageCache from "./web/arrow_page_cache.js" with { type: "text" };
 import arrowTree from "./web/arrow_tree.js" with { type: "text" };
+import resourceTree from "./web/resource_tree.js" with { type: "text" };
 import styles from "./web/style.css" with { type: "text" };
 import queryClient from "./web/jdv_query.js" with { type: "text" };
 import sequentialClient from "./web/sequential.js" with { type: "text" };
@@ -309,6 +310,10 @@ function handleHttp(
     },
     "/assets/arrow_tree.js": {
       body: arrowTree,
+      type: "text/javascript; charset=utf-8",
+    },
+    "/assets/resource_tree.js": {
+      body: resourceTree,
       type: "text/javascript; charset=utf-8",
     },
     "/assets/style.css": { body: styles, type: "text/css; charset=utf-8" },

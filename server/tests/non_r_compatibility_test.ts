@@ -351,6 +351,20 @@ Deno.test("R-free producer interoperates with the host over WebSocket", async ()
   }
 });
 
+Deno.test("hello capabilities are validated over the producer socket", async () => {
+  const harness = await NonRProducerHarness.start({
+    capabilities: { resources: true, future_member: "ignored" },
+  });
+  try {
+    for (const capabilities of [null, { resources: "yes" }, [true]]) {
+      const reply = await harness.rejectedHello(capabilities);
+      assertEquals((reply.error as Frame).code, "unsupported");
+    }
+  } finally {
+    await harness.close();
+  }
+});
+
 function isRecord(value: unknown): value is Frame {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
