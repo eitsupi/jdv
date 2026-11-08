@@ -12,7 +12,8 @@ jdv has three kinds of views:
 
 The viewer also has a resource explorer. Once R connects, it lists the
 variables of the global environment, so you can open one without calling
-`jdv_view()`.
+`jdv_view()`. The list updates by itself after each top-level command finishes
+(variables added, removed, or changed in class), without pressing Refresh.
 
 ## Why jdv?
 

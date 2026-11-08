@@ -348,6 +348,189 @@ Deno.test({
   },
 });
 
+/** The text of the explorer row of one variable, or null when it is absent. */
+function rowText(page: Page, name: string): Promise<string | null> {
+  return evaluate(
+    page,
+    (name: string) => {
+      const doc = (globalThis as unknown as {
+        document: {
+          querySelectorAll(selector: string): {
+            textContent: string | null;
+            querySelector(selector: string): {
+              textContent: string | null;
+            } | null;
+          }[];
+        };
+      }).document;
+      for (const row of doc.querySelectorAll("#resources .resource-row")) {
+        if (row.querySelector(".resource-label")?.textContent === name) {
+          return row.textContent ?? "";
+        }
+      }
+      return null;
+    },
+    { args: [name] },
+  ) as Promise<string | null>;
+}
+
+async function waitForRow(
+  page: Page,
+  name: string,
+  predicate: (text: string | null) => boolean,
+  description: string,
+): Promise<string | null> {
+  const deadline = Date.now() + 20_000;
+  let last: string | null = null;
+  while (Date.now() < deadline) {
+    last = await rowText(page, name);
+    if (predicate(last)) return last;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(
+    `Timed out waiting for ${description}; saw ${JSON.stringify(last)}`,
+  );
+}
+
+Deno.test({
+  name: "real R resource explorer updates itself after top-level commands",
+  ignore: !testLibrary,
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    let runtime: Runtime | undefined;
+    let directory: string | undefined;
+    let owned: Awaited<ReturnType<typeof launch>> | undefined;
+    let page: Page | undefined;
+    let primaryError: unknown;
+    const pageErrors: string[] = [];
+    try {
+      await bodyDeadline("Resource explorer auto update E2E body", async () => {
+        directory = await Deno.makeTempDir({ prefix: "jdv-resources-auto-" });
+        const promiseMarker = join(directory, "promise-forced");
+        const activeMarker = join(directory, "active-read");
+        const setup = [
+          "auto_df <- mtcars[1:5, ]",
+          "auto_gone <- 1",
+          "auto_same <- 1",
+          "auto_class <- 1",
+          ".auto_hidden <- 1",
+          `delayedAssign("auto_promise", {` +
+          `cat("forced\\n", file = ${rQuote(promiseMarker)}); 1})`,
+          `makeActiveBinding("auto_active", function() {` +
+          `cat("read\\n", file = ${rQuote(activeMarker)}); 1}, globalenv())`,
+        ].join("; ");
+        runtime = await startRuntime(setup);
+        const { server, arf } = runtime;
+
+        owned = await launch();
+        page = await owned.browser.newPage("about:blank", {
+          waitUntil: "none",
+        });
+        collectPageErrors(page, pageErrors);
+        await page.goto(server.url, { waitUntil: "load" });
+        await rEval(arf, "jdv_connect()");
+        await waitForLabels(
+          page,
+          (value) => value.includes("auto_df"),
+          "the initial listing",
+        );
+        // Wait until the explorer's subscription has reached R.
+        const subscribeDeadline = Date.now() + 20_000;
+        for (;;) {
+          const state = await rEval(
+            arf,
+            "cat(isTRUE(jdv:::.jdv_state$res_subscribed))",
+          );
+          if (state.stdout?.includes("TRUE")) break;
+          assert(
+            Date.now() < subscribeDeadline,
+            "The explorer never subscribed to changes.",
+          );
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+
+        // Open a view and the hidden toggle: both must survive updates.
+        await clickButton(
+          page,
+          "Open",
+          "#resources .resource-row",
+          0,
+          "auto_df",
+        );
+        await page.waitForSelector("#viewer:not([hidden]) .tabulator-row");
+        await click(page, '[data-action="toggle-hidden"]');
+        await waitForLabels(
+          page,
+          (value) => value.includes(".auto_hidden"),
+          "the hidden variable",
+        );
+        const views = await count(page, "#tables article");
+        assert(views >= 1);
+
+        // Additions and removals appear without pressing Refresh.
+        await rEvalVisible(arf, "auto_added <- 'x'; rm(auto_gone)");
+        await waitForLabels(
+          page,
+          (value) =>
+            value.includes("auto_added") && !value.includes("auto_gone"),
+          "the automatic update",
+        );
+        assertEquals(await count(page, "#tables article"), views);
+        assertEquals(await count(page, "#viewer:not([hidden])"), 1);
+        assert((await labels(page)).includes(".auto_hidden"));
+
+        // A class change updates the row.
+        const before = await rowText(page, "auto_class");
+        await rEvalVisible(arf, "auto_class <- mtcars[1:2, ]");
+        await waitForRow(
+          page,
+          "auto_class",
+          (value) => value !== null && value !== before,
+          "the changed row",
+        );
+
+        // A reassignment that lists the same must not break anything.
+        await rEvalVisible(arf, "auto_same <- 2");
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        assert((await labels(page)).includes("auto_same"));
+
+        // A silent evaluation does not run the task callback, but an explicit
+        // observation reports it.
+        await rEval(arf, "auto_silent <- 1");
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        await rEval(arf, "jdv_rpc(NULL)");
+        await waitForLabels(
+          page,
+          (value) => value.includes("auto_silent"),
+          "the silent change after an explicit observation",
+        );
+
+        // Neither watching nor listing evaluated the promise or the binding.
+        for (const marker of [promiseMarker, activeMarker]) {
+          assert(
+            !(await Deno.stat(marker).then(() => true, () => false)),
+            `${marker} was created by watching the environment.`,
+          );
+        }
+        assertEquals(await count(page, "#viewer:not([hidden])"), 1);
+        assertEquals(pageErrors, []);
+      }, 240_000);
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      await finishIntegrationCleanup([
+        () => page?.close(),
+        () => owned?.close(),
+        () => runtime?.arf.close(),
+        () => runtime?.server.close(),
+        ...(directory ? [() => removeCacheDirectory(directory!)] : []),
+      ], primaryError === undefined ? [] : [primaryError]);
+    }
+  },
+});
+
 Deno.test({
   name: "real R session with jdv.resources = FALSE has no explorer",
   ignore: !testLibrary,
@@ -386,6 +569,15 @@ Deno.test({
         );
         await page.waitForSelector("#viewer:not([hidden]) .tabulator-row");
         assertEquals(await count(page, "#resources .resource-explorer"), 0);
+        // Nothing subscribes to changes.
+        const state = await rEval(
+          runtime.arf,
+          "cat(isTRUE(jdv:::.jdv_state$res_subscribed))",
+        );
+        assert(
+          state.stdout?.includes("FALSE") === true,
+          `Unexpected state ${state.stdout}`,
+        );
         assertEquals(pageErrors, []);
       }, 120_000);
     } catch (error) {

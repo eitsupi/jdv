@@ -524,6 +524,30 @@ test_that("jdv_rpc(NULL) detects a change for the next jdv_notifications()", {
   expect_identical(methods, "resources/changed")
 })
 
+test_that("an embedded session reports each change once until it is taken", {
+  chg_session()
+  chg_subscribe()
+  expect_identical(chg_observe(), character())
+
+  assign("jdvchg_e1", 1, envir = globalenv())
+  withr::defer(suppressWarnings(rm("jdvchg_e1", envir = globalenv())))
+  # Several observations before taking merge into a single notification.
+  jdv_rpc(NULL)
+  jdv_rpc(NULL)
+  methods <- vapply(
+    lapply(jdv_notifications(), .jdv_json_parse),
+    function(message) message$method,
+    ""
+  )
+  expect_identical(methods, "resources/changed")
+  expect_identical(chg_observe(), character())
+
+  # A change after taking is reported again.
+  assign("jdvchg_e2", 1, envir = globalenv())
+  withr::defer(suppressWarnings(rm("jdvchg_e2", envir = globalenv())))
+  expect_identical(chg_observe(), "resources/changed")
+})
+
 test_that("the handle API does not accept resources/subscribe", {
   handle <- jdv_handle(mtcars)
   on.exit(jdv_handle_close(handle), add = TRUE)
