@@ -119,11 +119,12 @@ More values may be added; a host treats an unknown or missing value as
    \code{"child"} \tab A child view is opened by \code{object/open}. \cr
    \code{"tracked"} \tab A producer rebuilds a tracked view automatically. \cr
    \code{"refresh"} \tab A view is rebuilt by \code{view/refresh}. \cr
+   \code{"resource"} \tab A view is opened by \code{resources/open} (see Resource trees). \cr
 }
 
 
-A host can bring a view to the front for \code{"register"} and \code{"child"}, and
-update it quietly for \code{"tracked"} and \code{"refresh"}.
+A host can bring a view to the front for \code{"register"}, \code{"child"}, and
+\code{"resource"}, and update it quietly for \code{"tracked"} and \code{"refresh"}.
 
 Grid-level flags declare the operations available in protocol v1; each
 column's \code{sortable} field constrains sorting, and \code{filterable} constrains
@@ -334,6 +335,10 @@ cancellation and host timeout are separate from these producer failures.
    \code{ack} \tab Producer to host \tab Notification \tab Cumulatively acknowledges complete host-to-producer JSONL frames read. \cr
 }
 
+
+The optional \code{resources/children} and \code{resources/open} methods are described
+under Resource trees.
+
  \code{view/schema}:
 
 Parameters are \code{view} and \code{generation}. The result contains \code{view},
@@ -427,6 +432,9 @@ At the start of each producer-to-host connection, the producer sends a
       "version": "1.0.0"
     \},
     "wake": true,
+    "capabilities": \{
+      "resources": true
+    \},
     "limits": \{
       "max_unacked_frames": 264,
       "max_unacked_bytes": 1048577,
@@ -457,6 +465,15 @@ incompatible message semantics.
 \code{wake} notifications while requests await terminal responses. When omitted or
 \code{false}, the host must not send \code{wake}. A producer that needs periodic wakes
 sets \code{wake} to \code{true}.
+
+\code{capabilities} is optional and, when present, is an object of optional
+session-level features. Each known member is a Boolean; any other value is
+invalid. An omitted member or object means \code{false}. Unknown members are
+ignored. The only member defined in v1 is \code{resources}, which declares the
+resource tree methods (see Resource trees). A host that does not use a
+feature ignores its member; declaring a feature does not by itself cause any
+request or notification. Capabilities are fixed for the session when \code{hello}
+is sent.
 
 \code{hello} is the first producer message on a new connection. A disconnect
 closes the views associated with that connection.
@@ -659,7 +676,7 @@ display the code without requiring code-specific recovery behavior.\tabular{ll}{
    \code{interrupted} \tab Request processing began and was interrupted. \cr
    \code{cancelled} \tab The accepted request was cancelled before processing began. \cr
    \code{expired} \tab The request deadline elapsed before processing began. \cr
-   \code{unavailable} \tab A well-formed object path no longer resolves or cannot be read safely. \cr
+   \code{unavailable} \tab A well-formed object path or resource node no longer resolves or cannot be read safely. \cr
    \code{stale_generation} \tab The request names a generation that is no longer active. \cr
    \code{view_not_found} \tab The view id is missing or closed. \cr
    \code{cache_changed} \tab A host-only sequential append cursor differs from the observed tail; refresh the host page catalog before advancing. \cr
@@ -673,6 +690,191 @@ Request and response size limits are negotiated in \code{hello}. A producer that
 cannot satisfy a request or configured budget returns \code{limit_exceeded}.
 Per-column channel failures may be reported in the page payload without
 failing the entire request.
+
+ Resource trees:
+
+A resource tree lists the resources a session offers, such as the top-level
+variables of an interpreter or the catalogs, schemas, and tables of a
+database connection, so a viewer can browse them without opening a view
+first. It is optional: a producer declares it with
+\code{hello.params.capabilities.resources: true}. A host that does not use
+resource trees ignores the capability and is not required to handle any
+method in this section.
+
+The resource tree belongs to the session, not to a view. It has no view id
+and no generation, it is available while the session has no views, and
+closing, refreshing, or replacing views does not change it. It ends with the
+session. Inside a view, an object is explored with that view's own methods; a
+resource tree only lists entry points and opens them as ordinary views.\tabular{llll}{
+   Method \tab Direction \tab Kind \tab Result \cr
+   \code{resources/children} \tab Host to producer \tab Request \tab One page of the children of a node or the root. \cr
+   \code{resources/open} \tab Host to producer \tab Request \tab Opens one node as a new view. \cr
+}
+
+
+A host sends these requests only to a session whose \code{hello} declared the
+capability. A producer that did not declare it returns \code{unsupported} or
+\code{method_not_found}.
+\subsection{Nodes}{
+
+The root has no id and is never listed as a node. Every other node is
+identified by its \code{id}, a non-empty string of at most 16,384 UTF-8 bytes
+chosen by the producer. An id is opaque: a host or viewer stores it and sends
+it back, but does not parse, build, compare as a path, or display it. An id
+identifies a node within its session; it is not valid in another session.
+While a node exists, the producer gives it the same id in every listing, and
+it never gives that id to a different node. Whether a resource that is
+removed and created again is the same node is up to the producer; for
+example, a producer that identifies variables by name treats them as the
+same. An id names a resource, not a value captured when the page was listed:
+the producer resolves it again for every request, so a node that still exists
+may describe or open different content after a change.
+
+A child entry has these fields:\tabular{llll}{
+   Field \tab Type \tab Required \tab Meaning \cr
+   \code{id} \tab string \tab See text \tab Opaque node id. \cr
+   \code{label} \tab string \tab Yes \tab Display name, at most 1,000 Unicode code points. \cr
+   \code{kind} \tab string \tab Yes \tab Display hint token described below. \cr
+   \code{summary} \tab string \tab No \tab Short description, at most 1,000 Unicode code points. \cr
+   \code{has_children} \tab Boolean \tab Yes \tab Whether \code{resources/children} may list children of this node. \cr
+   \code{viewable} \tab Boolean \tab Yes \tab Whether \code{resources/open} may open this node. \cr
+   \code{hidden} \tab Boolean \tab No \tab Whether a viewer should hide this node by default; omitted means \code{false}. \cr
+   \code{unavailable} \tab string \tab No \tab Token explaining why the node cannot be read, expanded, or opened. \cr
+}
+
+
+\code{has_children} and \code{viewable} are independent: a node may be both expandable
+and viewable, either one, or neither. When neither is true, the node is still
+listed so that the viewer shows it exists. \code{id} is required unless the node
+cannot be identified within the id limit; such a node has
+\code{has_children: false}, \code{viewable: false}, and \code{unavailable: "id_limit"}.
+
+\code{kind} is a hint for icons and grouping and does not decide which view kind
+opens. Recommended tokens are \code{container} (holds other resources, such as a
+schema), \code{table} (rectangular data), \code{object} (structured data), \code{value} (a
+scalar or simple vector), \code{function}, and \code{unknown}. More tokens may be
+added; a viewer treats an unrecognized token as \code{unknown}. The kind of view
+that opens is known only from the \code{view/open} descriptor. A label is not
+unique and is not an id.
+
+\code{kind} and \code{unavailable} tokens are 1 to 64 characters from lowercase ASCII
+letters, digits, and \verb{_}.
+
+\code{hidden} marks a node that the producer's environment conventionally hides,
+for example a name with a leading dot in R. Producers still list hidden
+nodes, and they can be addressed and opened as usual; whether to show them
+is a viewer option. Hidden nodes count toward \code{offset}, \code{limit},
+\code{total_children}, and \code{next_offset} like any other node, so a page may hold
+only hidden nodes and still have a next page; a viewer advances by
+\code{next_offset}, not by the number of rows it shows. \code{unavailable} is a short
+token from a producer-defined vocabulary; a viewer may show it but must not
+depend on a particular value, except \code{id_limit} above.
+
+Producers may add fields to a child entry. A viewer ignores fields it does
+not know.
+}
+
+\subsection{\code{resources/children}}{
+
+\if{html}{\out{<div class="sourceCode json">}}\preformatted{\{
+  "id": "resources-1",
+  "method": "resources/children",
+  "params": \{ "node": null, "offset": 0, "limit": 200 \}
+\}
+}\if{html}{\out{</div>}}
+
+\code{node} is a node id, or \code{null} or omitted for the root. \code{offset} is a
+zero-based, non-negative safe integer that defaults to 0; \code{limit} is an
+integer from 1 through 500 that defaults to 200. Other values return
+\code{invalid_request}. The result is:
+
+\if{html}{\out{<div class="sourceCode json">}}\preformatted{\{
+  "node": null,
+  "offset": 0,
+  "children": [
+    \{
+      "id": "t:main.orders",
+      "label": "orders",
+      "kind": "table",
+      "summary": "table, 12 columns",
+      "has_children": false,
+      "viewable": true
+    \}
+  ],
+  "total_children": 1,
+  "next_offset": null
+\}
+}\if{html}{\out{</div>}}
+
+All five fields are required. \code{node} and \code{offset} repeat the request, with
+\code{null} for the root; \code{offset} is not clamped to the end. \code{children} is an
+array of at most \code{limit} entries. \code{total_children} is the number of children
+when the request was handled as a non-negative safe integer, or \code{null} when
+the producer does not know it. \code{next_offset} is \code{null} when this page reaches
+the end; otherwise it is \code{offset} plus the number of children returned, and
+\code{children} is not empty. A producer may return fewer children than \code{limit} to
+stay within its response byte limit, so a short page does not mean the end;
+only \code{next_offset: null} does. If not even one child fits, the request fails
+with \code{limit_exceeded} rather than returning an empty page that is not the
+end. An \code{offset} at or past the end, and a node whose \code{has_children} is
+false, return an empty page with \code{next_offset: null}.
+
+Children come in an order that stays the same while the listed resources do
+not change. The protocol does not otherwise define the order; a producer
+extension may. A page reflects the resources when it was handled: if
+resources are added or removed between page requests, a later page may
+repeat or skip entries, and \code{total_children} may change. A viewer that
+appends pages for one parent drops entries whose id it already added for that
+parent since the listing last started from offset 0; entries without an id
+are never treated as duplicates. The same node may appear under different
+parents. A viewer refreshes by requesting again from offset 0. Protocol v1
+defines no change notification for resource trees; viewers refresh on
+request.
+}
+
+\subsection{\code{resources/open}}{
+
+\if{html}{\out{<div class="sourceCode json">}}\preformatted{\{
+  "id": "resources-2",
+  "method": "resources/open",
+  "params": \{ "node": "t:main.orders" \}
+\}
+}\if{html}{\out{</div>}}
+
+\code{node} is a required node id. A producer extension may accept additional open
+options. The producer resolves the node and opens it as a new top-level view,
+sending its \code{view/open} notification with \code{reason: "resource"} before the
+response. The result is that view's \code{view/open.params} descriptor; as for
+\code{object/open}, a host registers the view from the notification, must not
+create or revive a view from the response, and uses the response only to find
+the view. If building the response fails, the producer closes the view and
+does not send its \code{view/open}.
+
+The opened view is a top-level view and has no parent view. It follows the
+usual view lifecycle and descriptor capabilities, including the producer's
+view limits. Listing or refreshing the resource tree never closes it, and
+closing it does not change the resource tree. Every successful open creates a
+new view, even for a node that is already open.
+
+Opening is not idempotent. After a host cancels a sent \code{resources/open} or
+its deadline expires, the view may still be opened and its \code{view/open} may
+still arrive. A host does not retry an open automatically.
+}
+
+\subsection{Errors}{
+
+An id that is malformed or that the producer does not recognize as one of its
+own ids returns \code{invalid_request}. A well-formed id whose resource no longer
+exists or cannot be read safely returns \code{unavailable}, as does
+\code{resources/open} on a node that is not viewable. A producer need not remember
+the ids it has issued.
+
+Resource tree requests follow the same request, queue, byte, acknowledgement,
+wake, deadline, and cancellation rules as view requests. Because they name no
+view, closing a view or moving it to a new generation does not cancel them;
+they end with the requesting client or the session. Their responses are JSON
+only and never carry an Arrow IPC binary body.
+}
 }
 
 \section{R producer extension}{
