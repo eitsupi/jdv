@@ -1091,3 +1091,763 @@ Deno.test("fixture resource requests survive view close and end with the session
     f.close();
   }
 });
+
+// --- Change notifications ---------------------------------------------------
+
+const CHANGES: Json = {
+  capabilities: { resources: true, resource_changes: true },
+};
+
+type Setup = Awaited<ReturnType<typeof setup>>;
+
+const sessionIds = new WeakMap<Setup, string>();
+
+function ask(
+  f: Setup,
+  browser: MemoryBrowser,
+  id: string,
+  enabled: unknown,
+  extra: Json = {},
+): void {
+  f.hub.handleBrowser(browser, {
+    type: "request",
+    id,
+    session: sessionIds.get(f) ?? "",
+    method: "resources/subscribe",
+    params: { enabled },
+    ...extra,
+  });
+}
+
+async function changesSetup(session: string, limits?: Json): Promise<Setup> {
+  const f = await setup(session, CHANGES, limits);
+  sessionIds.set(f, session);
+  return f;
+}
+
+function extraBrowser(f: Setup): MemoryBrowser {
+  const browser = new MemoryBrowser();
+  f.hub.attach(browser);
+  return browser;
+}
+
+function subscribeValues(connection: MemoryConnection): unknown[] {
+  return methodsWritten(connection, "resources/subscribe").map((frame) =>
+    (frame.params as Json).enabled
+  );
+}
+
+async function nthSubscribe(
+  connection: MemoryConnection,
+  count: number,
+): Promise<Json> {
+  await waitFor(() => subscribeValues(connection).length >= count);
+  return methodsWritten(connection, "resources/subscribe")[count - 1];
+}
+
+function answer(connection: MemoryConnection, frame: Json, enabled: boolean) {
+  connection.inject({ id: frame.id, result: { enabled }, warnings: [] });
+}
+
+function changedMessages(browser: MemoryBrowser): Json[] {
+  return browser.messages.filter((message) =>
+    message.type === "notification" &&
+    (message.message as Json | undefined)?.method === "resources/changed"
+  );
+}
+
+function changedFrom(connection: MemoryConnection, params?: unknown): void {
+  connection.inject({
+    method: "resources/changed",
+    ...(params === undefined ? {} : { params }),
+  });
+}
+
+Deno.test("resources/subscribe needs the resource_changes capability", async () => {
+  for (
+    const extra of [
+      {},
+      { capabilities: { resources: true } },
+      { capabilities: { resources: true, resource_changes: false } },
+    ]
+  ) {
+    const f = await setup("chg-gate", extra);
+    sessionIds.set(f, "chg-gate");
+    try {
+      ask(f, f.browser, "s", true);
+      assertEquals(code(await f.browser.terminal("s")), "unsupported");
+      await settle();
+      assertEquals(f.connection.writes.length, 0);
+      // An unannounced notification is not passed on.
+      changedFrom(f.connection, {});
+      await settle();
+      assertEquals(changedMessages(f.browser).length, 0);
+    } finally {
+      f.hub.close();
+    }
+  }
+});
+
+Deno.test("hello validates resource_changes", async () => {
+  for (
+    const capabilities of [
+      { resources: true, resource_changes: 1 },
+      { resources: true, resource_changes: "true" },
+      { resources: true, resource_changes: null },
+      { resource_changes: true },
+      { resources: false, resource_changes: true },
+    ]
+  ) {
+    const hub = new Hub();
+    const connection = new MemoryConnection();
+    hub.acceptProducer(connection);
+    connection.inject(helloFrame("chg-bad-caps", { capabilities }));
+    await waitFor(() => connection.closed);
+    const reply = JSON.parse(connection.writes[0]) as Json;
+    assertEquals((reply.error as Json).code, "unsupported");
+    hub.close();
+  }
+  for (
+    const capabilities of [
+      { resources: true, resource_changes: true },
+      { resources: true, resource_changes: false },
+      { resources: false, resource_changes: false },
+      { resources: true, resource_changes: true, future: 1 },
+    ]
+  ) {
+    const f = await setup("chg-good-caps", { capabilities });
+    try {
+      assertEquals(f.connection.closed, false);
+    } finally {
+      f.hub.close();
+    }
+  }
+});
+
+Deno.test("resources/subscribe validates its parameters and allows one active request per client", async () => {
+  const f = await changesSetup("chg-params");
+  try {
+    for (const [id, enabled] of [["a", "yes"], ["b", 1], ["c", null]]) {
+      ask(f, f.browser, id as string, enabled);
+      assertEquals(
+        code(await f.browser.terminal(id as string)),
+        "invalid_request",
+      );
+    }
+    f.hub.handleBrowser(f.browser, {
+      type: "request",
+      id: "extra",
+      session: "chg-params",
+      method: "resources/subscribe",
+      params: { enabled: true, other: 1 },
+    });
+    assertEquals(code(await f.browser.terminal("extra")), "invalid_request");
+    await settle();
+    assertEquals(f.connection.writes.length, 0);
+
+    ask(f, f.browser, "first", true);
+    const sent = await nthSubscribe(f.connection, 1);
+    ask(f, f.browser, "second", false);
+    assertEquals(code(await f.browser.terminal("second")), "busy");
+    ask(f, f.browser, "first", false);
+    await waitFor(() => f.browser.messages.some((m) => m.id === "first"));
+    assertEquals(
+      code(f.browser.messages.find((m) => m.id === "first")!),
+      "invalid_request",
+    );
+    answer(f.connection, sent, true);
+    await waitFor(() =>
+      f.browser.messages.some((m) => m.id === "first" && m.type === "response")
+    );
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("a client subscribes, receives resources/changed, and unsubscribing disables the producer", async () => {
+  const f = await changesSetup("chg-single");
+  try {
+    ask(f, f.browser, "on", true);
+    const enable = await nthSubscribe(f.connection, 1);
+    assertEquals(enable.params, { enabled: true });
+    // The success waits for the producer.
+    await settle();
+    assertEquals(f.browser.messages.some((m) => m.id === "on"), false);
+    changedFrom(f.connection, {});
+    await settle();
+    assertEquals(changedMessages(f.browser).length, 0);
+    answer(f.connection, enable, true);
+    const done = await f.browser.terminal("on");
+    assertEquals(done.type, "response");
+    assertEquals(done.session, "chg-single");
+    assertEquals(done.result, { enabled: true });
+
+    // No view exists, and the notification still arrives in the usual shape.
+    changedFrom(f.connection, { ignored: "member" });
+    await waitFor(() => changedMessages(f.browser).length === 1);
+    assertEquals(changedMessages(f.browser)[0], {
+      type: "notification",
+      session: "chg-single",
+      message: { method: "resources/changed", params: {} },
+    });
+
+    // Repeating the same value neither contacts the producer nor changes state.
+    ask(f, f.browser, "again", true);
+    assertEquals((await f.browser.terminal("again")).result, { enabled: true });
+    assertEquals(subscribeValues(f.connection), [true]);
+
+    ask(f, f.browser, "off", false);
+    const disable = await nthSubscribe(f.connection, 2);
+    assertEquals(disable.params, { enabled: false });
+    answer(f.connection, disable, false);
+    assertEquals((await f.browser.terminal("off")).result, { enabled: false });
+    changedFrom(f.connection, {});
+    await settle();
+    assertEquals(changedMessages(f.browser).length, 1);
+    // Unsubscribing again is a no-op for the producer.
+    ask(f, f.browser, "off2", false);
+    assertEquals((await f.browser.terminal("off2")).result, { enabled: false });
+    assertEquals(subscribeValues(f.connection), [true, false]);
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("two clients share one producer subscription and each leaves on its own", async () => {
+  const f = await changesSetup("chg-two");
+  const other = extraBrowser(f);
+  const bystander = extraBrowser(f);
+  try {
+    ask(f, f.browser, "a-on", true);
+    const enable = await nthSubscribe(f.connection, 1);
+    answer(f.connection, enable, true);
+    await f.browser.terminal("a-on");
+    // The second subscriber is answered without another producer request.
+    ask(f, other, "b-on", true);
+    assertEquals((await other.terminal("b-on")).result, { enabled: true });
+    assertEquals(subscribeValues(f.connection), [true]);
+
+    changedFrom(f.connection, {});
+    await waitFor(() =>
+      changedMessages(f.browser).length === 1 &&
+      changedMessages(other).length === 1
+    );
+    // A client that never subscribed gets nothing.
+    assertEquals(changedMessages(bystander).length, 0);
+
+    // One client leaving keeps the other subscribed and the producer enabled.
+    ask(f, f.browser, "a-off", false);
+    assertEquals((await f.browser.terminal("a-off")).result, {
+      enabled: false,
+    });
+    changedFrom(f.connection, {});
+    await waitFor(() => changedMessages(other).length === 2);
+    assertEquals(changedMessages(f.browser).length, 1);
+    assertEquals(subscribeValues(f.connection), [true]);
+
+    // The last one leaving disables the producer.
+    ask(f, other, "b-off", false);
+    const disable = await nthSubscribe(f.connection, 2);
+    assertEquals(disable.params, { enabled: false });
+    answer(f.connection, disable, false);
+    assertEquals((await other.terminal("b-off")).result, { enabled: false });
+    assertEquals(changedMessages(bystander).length, 0);
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("a second subscriber that arrives while the producer is being enabled waits for the same request", async () => {
+  const f = await changesSetup("chg-join");
+  const other = extraBrowser(f);
+  try {
+    ask(f, f.browser, "a-on", true);
+    const enable = await nthSubscribe(f.connection, 1);
+    ask(f, other, "b-on", true);
+    await settle();
+    assertEquals(subscribeValues(f.connection), [true]);
+    assertEquals(other.messages.some((m) => m.id === "b-on"), false);
+    answer(f.connection, enable, true);
+    assertEquals((await f.browser.terminal("a-on")).type, "response");
+    assertEquals((await other.terminal("b-on")).type, "response");
+    assertEquals(subscribeValues(f.connection), [true]);
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("detaching the last subscriber disables the producer and a non-last one does not", async () => {
+  const f = await changesSetup("chg-detach");
+  const other = extraBrowser(f);
+  try {
+    for (const [browser, id] of [[f.browser, "a"], [other, "b"]] as const) {
+      ask(f, browser, id, true);
+    }
+    const enable = await nthSubscribe(f.connection, 1);
+    answer(f.connection, enable, true);
+    await f.browser.terminal("a");
+    await other.terminal("b");
+    f.hub.detach(f.browser);
+    await settle();
+    assertEquals(subscribeValues(f.connection), [true]);
+    changedFrom(f.connection, {});
+    await waitFor(() => changedMessages(other).length === 1);
+    f.hub.detach(other);
+    const disable = await nthSubscribe(f.connection, 2);
+    assertEquals(disable.params, { enabled: false });
+    answer(f.connection, disable, false);
+    await settle();
+    assertEquals(subscribeValues(f.connection), [true, false]);
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("a client that disconnects while its enable is in flight leaves the producer disabled", async () => {
+  const f = await changesSetup("chg-gone");
+  try {
+    ask(f, f.browser, "on", true);
+    const enable = await nthSubscribe(f.connection, 1);
+    f.hub.detach(f.browser);
+    // The request is not withdrawn: the hub waits for the producer, then undoes it.
+    await settle();
+    assertEquals(subscribeValues(f.connection), [true]);
+    assertEquals(methodsWritten(f.connection, "cancel").length, 0);
+    answer(f.connection, enable, true);
+    const disable = await nthSubscribe(f.connection, 2);
+    assertEquals(disable.params, { enabled: false });
+    answer(f.connection, disable, false);
+    await settle();
+    assertEquals(changedMessages(f.browser).length, 0);
+    assertEquals(subscribeValues(f.connection), [true, false]);
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("cancelling an enable withdraws it, while cancelling a leave keeps the client unsubscribed", async () => {
+  const f = await changesSetup("chg-cancel");
+  const other = extraBrowser(f);
+  try {
+    ask(f, f.browser, "on", true);
+    const enable = await nthSubscribe(f.connection, 1);
+    f.hub.handleBrowser(f.browser, {
+      type: "cancel",
+      session: "chg-cancel",
+      id: "on",
+    });
+    assertEquals((await f.browser.terminal("on")).type, "cancelled");
+    answer(f.connection, enable, true);
+    const undo = await nthSubscribe(f.connection, 2);
+    assertEquals(undo.params, { enabled: false });
+    answer(f.connection, undo, false);
+    await settle();
+    changedFrom(f.connection, {});
+    await settle();
+    assertEquals(changedMessages(f.browser).length, 0);
+
+    // A subscribed client asks to leave and cancels the wait.
+    ask(f, other, "b-on", true);
+    const again = await nthSubscribe(f.connection, 3);
+    answer(f.connection, again, true);
+    await other.terminal("b-on");
+    ask(f, other, "b-off", false);
+    const leave = await nthSubscribe(f.connection, 4);
+    assertEquals(leave.params, { enabled: false });
+    f.hub.handleBrowser(other, {
+      type: "cancel",
+      session: "chg-cancel",
+      id: "b-off",
+    });
+    assertEquals((await other.terminal("b-off")).type, "cancelled");
+    answer(f.connection, leave, false);
+    await settle();
+    changedFrom(f.connection, {});
+    await settle();
+    assertEquals(changedMessages(other).length, 0);
+    assertEquals(subscribeValues(f.connection), [true, false, true, false]);
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("a subscriber that joins during a disable gets a new enable afterwards", async () => {
+  const f = await changesSetup("chg-flip");
+  const other = extraBrowser(f);
+  try {
+    ask(f, f.browser, "a-on", true);
+    answer(f.connection, await nthSubscribe(f.connection, 1), true);
+    await f.browser.terminal("a-on");
+    ask(f, f.browser, "a-off", false);
+    const disable = await nthSubscribe(f.connection, 2);
+    ask(f, other, "b-on", true);
+    await settle();
+    // One request at a time: the enable follows the disable.
+    assertEquals(subscribeValues(f.connection), [true, false]);
+    answer(f.connection, disable, false);
+    assertEquals((await f.browser.terminal("a-off")).type, "response");
+    const enable = await nthSubscribe(f.connection, 3);
+    assertEquals(enable.params, { enabled: true });
+    answer(f.connection, enable, true);
+    assertEquals((await other.terminal("b-on")).result, { enabled: true });
+    changedFrom(f.connection, {});
+    await waitFor(() => changedMessages(other).length === 1);
+    assertEquals(changedMessages(f.browser).length, 0);
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("a producer error on enable goes to the client and leaves the state disabled", async () => {
+  const f = await changesSetup("chg-error");
+  const other = extraBrowser(f);
+  try {
+    ask(f, f.browser, "on", true);
+    const enable = await nthSubscribe(f.connection, 1);
+    ask(f, other, "b-on", true);
+    f.connection.inject({
+      id: enable.id,
+      error: { code: "unavailable", message: "no" },
+      warnings: [],
+    });
+    const failed = await f.browser.terminal("on");
+    assertEquals([failed.type, failed.code], ["error", "unavailable"]);
+    assertEquals(code(await other.terminal("b-on")), "unavailable");
+    changedFrom(f.connection, {});
+    await settle();
+    assertEquals(changedMessages(f.browser).length, 0);
+    // Nothing is retried on its own, and a later attempt starts a new request.
+    await settle();
+    assertEquals(subscribeValues(f.connection), [true]);
+    ask(f, f.browser, "on2", true);
+    const retry = await nthSubscribe(f.connection, 2);
+    answer(f.connection, retry, true);
+    assertEquals((await f.browser.terminal("on2")).type, "response");
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("a producer error on disable is reported and the producer stays known as enabled", async () => {
+  const f = await changesSetup("chg-disable-error");
+  const other = extraBrowser(f);
+  try {
+    ask(f, f.browser, "on", true);
+    answer(f.connection, await nthSubscribe(f.connection, 1), true);
+    await f.browser.terminal("on");
+    ask(f, f.browser, "off", false);
+    const disable = await nthSubscribe(f.connection, 2);
+    f.connection.inject({
+      id: disable.id,
+      error: { code: "internal_error", message: "no" },
+      warnings: [],
+    });
+    assertEquals(code(await f.browser.terminal("off")), "internal_error");
+    await settle();
+    assertEquals(subscribeValues(f.connection), [true, false]);
+    // The client is unsubscribed anyway, and the producer is still enabled, so
+    // a new subscriber is answered without a request.
+    changedFrom(f.connection, {});
+    await settle();
+    assertEquals(changedMessages(f.browser).length, 0);
+    ask(f, other, "b-on", true);
+    assertEquals((await other.terminal("b-on")).result, { enabled: true });
+    assertEquals(subscribeValues(f.connection), [true, false]);
+    changedFrom(f.connection, {});
+    await waitFor(() => changedMessages(other).length === 1);
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("a mismatching subscribe response is an error and is not trusted", async () => {
+  const f = await changesSetup("chg-mismatch");
+  try {
+    ask(f, f.browser, "on", true);
+    const enable = await nthSubscribe(f.connection, 1);
+    f.connection.inject({
+      id: enable.id,
+      result: { enabled: false },
+      warnings: [],
+    });
+    assertEquals(code(await f.browser.terminal("on")), "invalid_request");
+    changedFrom(f.connection, {});
+    await settle();
+    assertEquals(changedMessages(f.browser).length, 0);
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("a subscribe request that times out is undone and a late answer is ignored", async () => {
+  const f = await changesSetup("chg-timeout");
+  try {
+    ask(f, f.browser, "on", true, { timeoutMs: 100 });
+    const enable = await nthSubscribe(f.connection, 1);
+    assertEquals(code(await f.browser.terminal("on")), "timeout");
+    await waitFor(() => methodsWritten(f.connection, "cancel").length === 1);
+    // The outcome is unknown, so the hub asks for the state it wants.
+    const disable = await nthSubscribe(f.connection, 2);
+    assertEquals(disable.params, { enabled: false });
+    // The late answer to the first request changes nothing.
+    answer(f.connection, enable, true);
+    answer(f.connection, disable, false);
+    await settle();
+    changedFrom(f.connection, {});
+    await settle();
+    assertEquals(changedMessages(f.browser).length, 0);
+    assertEquals(
+      f.browser.messages.filter((message) => message.id === "on").length,
+      1,
+    );
+    // A later subscription starts from the disabled state.
+    ask(f, f.browser, "on2", true);
+    const again = await nthSubscribe(f.connection, 3);
+    assertEquals(again.params, { enabled: true });
+    answer(f.connection, again, true);
+    assertEquals((await f.browser.terminal("on2")).type, "response");
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("a browser-side timeout of the wait withdraws an unconfirmed enable", async () => {
+  const f = await changesSetup("chg-wait-timeout");
+  const other = extraBrowser(f);
+  try {
+    ask(f, f.browser, "a-on", true, { timeoutMs: 100 });
+    const enable = await nthSubscribe(f.connection, 1);
+    // A longer wait joins the same request.
+    ask(f, other, "b-on", true, { timeoutMs: 60_000 });
+    assertEquals(code(await f.browser.terminal("a-on")), "timeout");
+    answer(f.connection, enable, true);
+    assertEquals((await other.terminal("b-on")).type, "response");
+    // The timed-out client is not subscribed; the other one is.
+    changedFrom(f.connection, {});
+    await waitFor(() => changedMessages(other).length === 1);
+    assertEquals(changedMessages(f.browser).length, 0);
+    assertEquals(subscribeValues(f.connection), [true]);
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("the session ending fails waiting subscribers and discards the subscription", async () => {
+  const f = await changesSetup("chg-end");
+  const other = extraBrowser(f);
+  try {
+    ask(f, f.browser, "a", true);
+    answer(f.connection, await nthSubscribe(f.connection, 1), true);
+    await f.browser.terminal("a");
+    ask(f, other, "b", true);
+    f.connection.close();
+    await other.nextMessage((m) => m.type === "session/closed");
+    // The subscription is gone with the session; a new session with the same
+    // id starts unsubscribed.
+    const next = new MemoryConnection();
+    f.hub.acceptProducer(next);
+    next.inject(helloFrame("chg-end", CHANGES));
+    await waitFor(() =>
+      other.messages.filter((m) => m.type === "session/open").length === 1
+    );
+    changedFrom(next, {});
+    await settle();
+    assertEquals(changedMessages(f.browser).length, 0);
+    assertEquals(changedMessages(other).length, 0);
+    ask(f, other, "c", true);
+    const enable = await nthSubscribe(next, 1);
+    assertEquals(enable.params, { enabled: true });
+    answer(next, enable, true);
+    assertEquals((await other.terminal("c")).type, "response");
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("a waiting subscribe fails with disconnected when the session ends", async () => {
+  const f = await changesSetup("chg-end-wait");
+  try {
+    ask(f, f.browser, "a", true);
+    await nthSubscribe(f.connection, 1);
+    f.connection.close();
+    assertEquals(code(await f.browser.terminal("a")), "disconnected");
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("malformed resources/changed notifications are ignored and unknown members dropped", async () => {
+  const f = await changesSetup("chg-malformed");
+  try {
+    ask(f, f.browser, "on", true);
+    answer(f.connection, await nthSubscribe(f.connection, 1), true);
+    await f.browser.terminal("on");
+    for (const params of ["text", 1, null, ["x"], true]) {
+      changedFrom(f.connection, params);
+    }
+    changedFrom(f.connection);
+    await settle();
+    assertEquals(changedMessages(f.browser).length, 0);
+    // None of them leaked through the generic notification path.
+    assertEquals(
+      f.browser.messages.filter((message) => message.type === "notification")
+        .length,
+      0,
+    );
+    changedFrom(f.connection, { unknown: { nested: [1] }, session: "other" });
+    await waitFor(() => changedMessages(f.browser).length === 1);
+    assertEquals(
+      (changedMessages(f.browser)[0].message as Json).params,
+      {},
+    );
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("a client that attaches later does not receive past changes and is not subscribed", async () => {
+  const f = await changesSetup("chg-late");
+  try {
+    ask(f, f.browser, "on", true);
+    answer(f.connection, await nthSubscribe(f.connection, 1), true);
+    await f.browser.terminal("on");
+    changedFrom(f.connection, {});
+    await waitFor(() => changedMessages(f.browser).length === 1);
+    const late = extraBrowser(f);
+    const welcome = late.messages.find((message) => message.type === "welcome");
+    assert(welcome !== undefined);
+    assert(!JSON.stringify(welcome).includes("resources/changed"));
+    changedFrom(f.connection, {});
+    await waitFor(() => changedMessages(f.browser).length === 2);
+    assertEquals(changedMessages(late).length, 0);
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("subscriptions do not change resource requests or view operations", async () => {
+  const f = await changesSetup("chg-views");
+  try {
+    ask(f, f.browser, "on", true);
+    answer(f.connection, await nthSubscribe(f.connection, 1), true);
+    await f.browser.terminal("on");
+    f.connection.inject(tableOpen());
+    await f.browser.nextMessage((message) => message.type === "view/open");
+    f.request("rows", "grid/rows", { view: "table-1", generation: 1 });
+    const rows = await f.connection.nextWrite(f.connection.writes.length);
+    assertEquals(rows.method, "grid/rows");
+    f.connection.inject({ id: rows.id, result: { rows: [] }, warnings: [] });
+    assertEquals((await f.browser.terminal("rows")).type, "response");
+    f.request("kids", "resources/children", { node: null });
+    const kids = await f.connection.nextWrite(f.connection.writes.length);
+    assertEquals(kids.method, "resources/children");
+    // A view closing does not touch the subscription.
+    f.connection.inject({
+      method: "view/closed",
+      params: { view: "table-1", generation: 1, reason: "producer" },
+    });
+    f.connection.inject({
+      id: kids.id,
+      result: page(null, 0, 1, null),
+      warnings: [],
+    });
+    assertEquals((await f.browser.terminal("kids")).type, "response");
+    changedFrom(f.connection, {});
+    await waitFor(() => changedMessages(f.browser).length === 1);
+    assertEquals(subscribeValues(f.connection), [true]);
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("subscribe requests share the request byte limit with other session requests", async () => {
+  const f = await changesSetup("chg-bytes", { max_request_bytes: 20 });
+  try {
+    ask(f, f.browser, "on", true);
+    // The internal request cannot be sent within the limit, so the client
+    // sees the failure and nothing stays subscribed.
+    assertEquals(code(await f.browser.terminal("on")), "limit_exceeded");
+    await settle();
+    assertEquals(subscribeValues(f.connection), []);
+    changedFrom(f.connection, {});
+    await settle();
+    assertEquals(changedMessages(f.browser).length, 0);
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("fixture producer: subscribe, change, and unsubscribe through the hub", async () => {
+  const f = await fixtureHub({
+    capabilities: { resources: true, resource_changes: true },
+  });
+  const other = new MemoryBrowser();
+  f.hub.attach(other);
+  try {
+    f.request("on", "resources/subscribe", { enabled: true });
+    assertEquals((await f.result("on")).enabled, true);
+    assertEquals(f.producer.subscribed, true);
+    // The fixture changes the tree and announces it.
+    f.producer.addRootTable("late");
+    assert(f.producer.signalResourcesChanged());
+    await f.browser.nextMessage((message) =>
+      message.type === "notification" &&
+      (message.message as Json).method === "resources/changed"
+    );
+    f.request("root", "resources/children", { limit: 10 });
+    const labels = ((await f.result("root")).children as Json[]).map((child) =>
+      child.label
+    );
+    assert(labels.includes("late"));
+    assertEquals(changedMessages(other).length, 0);
+
+    f.request("off", "resources/subscribe", { enabled: false });
+    assertEquals((await f.result("off")).enabled, false);
+    assertEquals(f.producer.subscribed, false);
+    assertEquals(f.producer.subscribeRequests, [true, false]);
+    // Not subscribed, the fixture sends nothing; a forced one is dropped.
+    assertEquals(f.producer.signalResourcesChanged(), false);
+    f.producer.signalResourcesChanged({ force: true });
+    f.producer.signalResourcesChanged({ force: true, params: "bad" });
+    f.request("probe", "resources/children", { limit: 1 });
+    await f.result("probe");
+    assertEquals(changedMessages(f.browser).length, 1);
+    assertEquals(changedMessages(other).length, 0);
+  } finally {
+    f.close();
+  }
+});
+
+Deno.test("fixture producer without resource_changes keeps its default behavior", async () => {
+  const f = await fixtureHub();
+  try {
+    f.request("on", "resources/subscribe", { enabled: true });
+    assertEquals(code(await f.browser.terminal("on")), "unsupported");
+    assertEquals(f.producer.resourceRequests.length, 0);
+    f.request("root", "resources/children", {});
+    assertEquals(((await f.result("root")).children as Json[]).length, 3);
+  } finally {
+    f.close();
+  }
+});
+
+Deno.test("fixture producer error on subscribe reaches the client", async () => {
+  const f = await fixtureHub({
+    capabilities: { resources: true, resource_changes: true },
+  });
+  try {
+    f.producer.onResource = (request) => {
+      if (request.method !== "resources/subscribe") return false;
+      void f.producer.respond(request.id, undefined, {
+        code: "unavailable",
+        message: "busy",
+      });
+      return true;
+    };
+    f.request("on", "resources/subscribe", { enabled: true });
+    assertEquals(code(await f.browser.terminal("on")), "unavailable");
+    assertEquals(f.producer.subscribed, false);
+  } finally {
+    f.close();
+  }
+});

@@ -35,7 +35,8 @@ async function arrow(): Promise<Record<string, (...args: never[]) => unknown>> {
 
 export interface FixtureOptions {
   // Declares hello capabilities. `resources: true` also enables the fixture's
-  // Resource Tree handling.
+  // Resource Tree handling, and `resource_changes: true` its handling of
+  // `resources/subscribe`.
   capabilities?: Json;
 }
 
@@ -275,6 +276,28 @@ export class FixtureProducer {
   #buffer: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
   readonly #extraRoot: FixtureNode[] = [];
 
+  /** Whether the fixture currently treats the session as subscribed. */
+  subscribed = false;
+
+  /** The `enabled` values of the `resources/subscribe` requests, in order. */
+  readonly subscribeRequests: boolean[] = [];
+
+  /**
+   * Sends `resources/changed` while subscribed. With `force`, it is sent even
+   * when unsubscribed, and `params` replaces the default empty object, so tests
+   * can send what a faulty producer would. Returns whether it was sent.
+   */
+  signalResourcesChanged(
+    options: { force?: boolean; params?: unknown } = {},
+  ): boolean {
+    if (!this.subscribed && !options.force) return false;
+    const frame: Json = { method: "resources/changed" };
+    if (!("params" in options)) frame.params = {};
+    else if (options.params !== undefined) frame.params = options.params;
+    void this.#send(frame);
+    return true;
+  }
+
   /** Descriptor of the most recent view opened by `resources/open`. */
   lastResourceDescriptor: Json | undefined;
 
@@ -445,6 +468,19 @@ export class FixtureProducer {
     const request = { id, method, params };
     this.resourceRequests.push(request);
     if (this.onResource && await this.onResource(request)) return;
+    if (method === "resources/subscribe") {
+      if (typeof params.enabled !== "boolean") {
+        await this.#reply(id, undefined, {
+          code: "invalid_request",
+          message: "enabled must be a Boolean.",
+        });
+        return;
+      }
+      this.subscribeRequests.push(params.enabled);
+      this.subscribed = params.enabled;
+      await this.#reply(id, { enabled: params.enabled });
+      return;
+    }
     if (method === "resources/children") {
       const node = params.node === undefined ? null : params.node;
       const offset = Number(params.offset ?? 0);
@@ -658,7 +694,9 @@ export class FixtureProducer {
           continue;
         }
         if (
-          (method === "resources/children" || method === "resources/open") &&
+          (method === "resources/children" || method === "resources/open" ||
+            (method === "resources/subscribe" &&
+              this.#options.capabilities?.resource_changes)) &&
           typeof frame.id === "string" && this.#options.capabilities?.resources
         ) {
           await this.#handleResource(method, params, frame.id);

@@ -91,6 +91,37 @@ interface PendingRequest {
   cancelSent: boolean;
   maxBytes: number;
   streamMaxRows?: number;
+  // Set for a request the hub sends on its own behalf (the aggregated
+  // resources/subscribe). It is called once when the request ends.
+  internal?: (outcome: InternalOutcome) => void;
+}
+
+type InternalOutcome =
+  | { kind: "result"; result: unknown }
+  // `unknown` is true when the producer may have applied the request anyway.
+  | { kind: "error"; code: string; message: string; unknown?: boolean };
+
+// One browser resources/subscribe request that waits for the producer state
+// to converge. A client has at most one at a time.
+interface SubscribeWaiter {
+  client: BrowserClient;
+  browserId: string;
+  enabled: boolean;
+  timer: ReturnType<typeof setTimeout> | undefined;
+}
+
+// The hub owns the subscription wishes of the browsers and drives the single
+// producer-side subscription towards them. `applied` is what the hub knows the
+// producer to be doing: null after a request whose outcome is unknown.
+interface SubscriptionState {
+  // Clients that asked to be subscribed, with their request still open or
+  // already answered.
+  wanted: Set<BrowserClient>;
+  // The subset that received a success and gets resources/changed.
+  confirmed: Set<BrowserClient>;
+  applied: boolean | null;
+  inflight: { enabled: boolean } | null;
+  waiters: SubscribeWaiter[];
 }
 
 interface OutboundFrame {
@@ -112,6 +143,8 @@ interface ProducerSession {
   limits: ProducerLimits;
   wake: boolean;
   resources: boolean;
+  resourceChanges: boolean;
+  subscription: SubscriptionState;
   peer: ProtocolPeer;
   views: Map<string, ViewRecord>;
   pending: Map<string, PendingRequest>;
@@ -185,6 +218,7 @@ export class Hub {
   detach(client: BrowserClient): void {
     this.#clients.delete(client);
     for (const session of this.#sessions.values()) {
+      this.#releaseSubscriber(session, client);
       for (const view of session.views.values()) {
         if (view.sequentialOwner === client) view.sequentialOwner = undefined;
       }
@@ -251,6 +285,9 @@ export class Hub {
     if (
       [...session.pending.values()].some((pending) =>
         pending.client === client && pending.browserId === browserId
+      ) ||
+      session.subscription.waiters.some((waiter) =>
+        waiter.client === client && waiter.browserId === browserId
       )
     ) {
       client.send({
@@ -276,6 +313,7 @@ export class Hub {
         "stream/cache/get",
         "resources/children",
         "resources/open",
+        "resources/subscribe",
       ].includes(method)
     ) {
       client.send({
@@ -284,6 +322,10 @@ export class Hub {
         code: "method_not_found",
         message: "Unsupported request method.",
       });
+      return;
+    }
+    if (method === "resources/subscribe") {
+      this.#subscribeFromBrowser(client, browserId, session, value, params);
       return;
     }
     if (method === "resources/children" || method === "resources/open") {
@@ -530,7 +572,7 @@ export class Hub {
   }
 
   #queueRequest(
-    client: BrowserClient,
+    client: BrowserClient | null,
     browserId: string,
     session: ProducerSession,
     value: JsonObject,
@@ -540,10 +582,27 @@ export class Hub {
       children?: ChildrenQuery;
       streamMaxRows?: number;
       owner?: ViewRecord;
+      internal?: (outcome: InternalOutcome) => void;
     },
   ): void {
     const method = value.method as string;
     const { scope, children, streamMaxRows } = options;
+    // A request the hub sends itself reports a rejection to its owner instead
+    // of a browser. The report is deferred so the owner never re-enters the
+    // code that is queueing.
+    const reject = (frame: JsonObject) => {
+      if (client) client.send(frame);
+      else if (options.internal) {
+        const internal = options.internal;
+        queueMicrotask(() =>
+          internal({
+            kind: "error",
+            code: String(frame.code),
+            message: String(frame.message),
+          })
+        );
+      }
+    };
     const timeout = Number.isFinite(value.timeoutMs)
       ? Math.min(MAX_TIMEOUT_MS, Math.max(100, Number(value.timeoutMs)))
       : DEFAULT_TIMEOUT_MS;
@@ -554,7 +613,7 @@ export class Hub {
       ? effectiveBinaryByteLimit(session)
       : params.max_bytes;
     if (!Number.isSafeInteger(maxBytes) || Number(maxBytes) < 0) {
-      client.send({
+      reject({
         type: "error",
         id: browserId,
         session: session.id,
@@ -584,6 +643,7 @@ export class Hub {
       cancelSent: false,
       maxBytes: Math.min(Number(maxBytes), effectiveBinaryByteLimit(session)),
       streamMaxRows,
+      internal: options.internal,
     };
     pending.requestFrame = {
       kind: "request",
@@ -614,7 +674,7 @@ export class Hub {
       pending.requestFrame.bytes - 1 > requestByteLimit ||
       pending.requestFrame.bytes > this.#ordinaryByteLimit(session)
     ) {
-      client.send({
+      reject({
         type: "error",
         id: browserId,
         session: session.id,
@@ -634,7 +694,7 @@ export class Hub {
       session.queuedRequestBytes > MAX_RETAINED_REQUEST_BYTES
     ) {
       this.#finishPending(session, pending);
-      client.send({
+      reject({
         type: "error",
         id: browserId,
         session: session.id,
@@ -645,7 +705,7 @@ export class Hub {
     }
     if (!this.#enqueue(session, pending.requestFrame)) {
       this.#finishPending(session, pending);
-      client.send({
+      reject({
         type: "error",
         id: browserId,
         code: "busy",
@@ -653,7 +713,7 @@ export class Hub {
       });
       return;
     }
-    if (options.owner) options.owner.sequentialOwner = client;
+    if (options.owner && client) options.owner.sequentialOwner = client;
     pending.timeoutTimer = setTimeout(
       () => this.#expire(session, pending),
       timeout,
@@ -846,6 +906,15 @@ export class Hub {
       wake: params.wake === true,
       resources: isObject(params.capabilities) &&
         params.capabilities.resources === true,
+      resourceChanges: isObject(params.capabilities) &&
+        params.capabilities.resource_changes === true,
+      subscription: {
+        wanted: new Set(),
+        confirmed: new Set(),
+        applied: false,
+        inflight: null,
+        waiters: [],
+      },
       peer,
       views: new Map(),
       pending: new Map(),
@@ -897,6 +966,33 @@ export class Hub {
       return;
     }
     this.#releaseRequestSlot(session, pending);
+    if (pending.internal) {
+      const internal = pending.internal;
+      pending.internal = undefined;
+      const live = !pending.localEnded && pending.state === "live";
+      this.#finishPending(session, pending);
+      if (live) {
+        const error = message.error;
+        if (body !== undefined) {
+          internal({
+            kind: "error",
+            code: "invalid_request",
+            message: "The producer returned a binary body for a subscription.",
+            unknown: true,
+          });
+        } else if (isObject(error)) {
+          internal({
+            kind: "error",
+            code: String(error.code),
+            message: typeof error.message === "string"
+              ? error.message.slice(0, 1024)
+              : "The producer rejected the subscription request.",
+          });
+        } else internal({ kind: "result", result: message.result });
+      }
+      this.#scheduleDrain(session);
+      return;
+    }
     const scope = pending.scope;
     const view = scope.kind === "view"
       ? session.views.get(scope.view)
@@ -1222,6 +1318,10 @@ export class Hub {
       this.#trackingChanged(session, params);
       return;
     }
+    if (message.method === "resources/changed") {
+      this.#resourcesChanged(session, params);
+      return;
+    }
     this.#broadcast({ type: "notification", session: session.id, message });
   }
 
@@ -1262,11 +1362,245 @@ export class Hub {
     });
   }
 
+  // A producer change hint reaches only the clients whose subscription was
+  // confirmed. It is never stored or broadcast to everyone.
+  #resourcesChanged(session: ProducerSession, params: unknown): void {
+    const subscription = session.subscription;
+    if (
+      !session.resourceChanges || !isObject(params) ||
+      subscription.applied === false || subscription.confirmed.size === 0
+    ) return;
+    for (const client of [...subscription.confirmed]) {
+      try {
+        client.send({
+          type: "notification",
+          session: session.id,
+          message: { method: "resources/changed", params: {} },
+        });
+      } catch {
+        this.detach(client);
+      }
+    }
+  }
+
+  #subscribeFromBrowser(
+    client: BrowserClient,
+    browserId: string,
+    session: ProducerSession,
+    value: JsonObject,
+    params: JsonObject,
+  ): void {
+    const subscription = session.subscription;
+    const fail = (code: string, message: string) =>
+      client.send({
+        type: "error",
+        id: browserId,
+        session: session.id,
+        code,
+        message,
+      });
+    if (!session.resourceChanges) {
+      fail(
+        "unsupported",
+        "The producer session does not support resource change notifications.",
+      );
+      return;
+    }
+    if (
+      typeof params.enabled !== "boolean" ||
+      Object.keys(params).some((name) => name !== "enabled")
+    ) {
+      fail(
+        "invalid_request",
+        "resources/subscribe accepts only a boolean enabled.",
+      );
+      return;
+    }
+    if (subscription.waiters.some((waiter) => waiter.client === client)) {
+      fail(
+        "busy",
+        "A resources/subscribe request from this client is already active.",
+      );
+      return;
+    }
+    const enabled = params.enabled;
+    if (enabled) subscription.wanted.add(client);
+    else {
+      // Leaving takes effect at once; the wait only reports the producer side.
+      subscription.wanted.delete(client);
+      subscription.confirmed.delete(client);
+    }
+    const timeout = Number.isFinite(value.timeoutMs)
+      ? Math.min(MAX_TIMEOUT_MS, Math.max(100, Number(value.timeoutMs)))
+      : DEFAULT_TIMEOUT_MS;
+    const waiter: SubscribeWaiter = {
+      client,
+      browserId,
+      enabled,
+      timer: undefined,
+    };
+    waiter.timer = setTimeout(() => {
+      if (!subscription.waiters.includes(waiter)) return;
+      this.#endWaiter(session, waiter);
+      client.send({
+        type: "error",
+        id: browserId,
+        session: session.id,
+        code: "timeout",
+        message:
+          "The producer did not complete this request before its deadline.",
+      });
+      this.#reconcile(session);
+    }, timeout);
+    subscription.waiters.push(waiter);
+    this.#reconcile(session, timeout);
+  }
+
+  // Removes a waiter that ends without an answer. An enable that was never
+  // confirmed is withdrawn so that it cannot keep the producer subscribed.
+  #endWaiter(session: ProducerSession, waiter: SubscribeWaiter): void {
+    const subscription = session.subscription;
+    clearTimeout(waiter.timer);
+    const index = subscription.waiters.indexOf(waiter);
+    if (index >= 0) subscription.waiters.splice(index, 1);
+    if (waiter.enabled && !subscription.confirmed.has(waiter.client)) {
+      subscription.wanted.delete(waiter.client);
+    }
+  }
+
+  // A client left: drop its wishes and waits and let the producer follow.
+  #releaseSubscriber(session: ProducerSession, client: BrowserClient): void {
+    const subscription = session.subscription;
+    for (const waiter of [...subscription.waiters]) {
+      if (waiter.client !== client) continue;
+      clearTimeout(waiter.timer);
+      subscription.waiters.splice(subscription.waiters.indexOf(waiter), 1);
+    }
+    subscription.wanted.delete(client);
+    subscription.confirmed.delete(client);
+    this.#reconcile(session);
+  }
+
+  // Moves the producer towards the state the subscribed clients want. Only one
+  // producer request is outstanding; a change of wishes while it runs is
+  // handled when it ends.
+  #reconcile(session: ProducerSession, timeout = DEFAULT_TIMEOUT_MS): void {
+    const subscription = session.subscription;
+    if (session.closed || subscription.inflight) return;
+    const desired = subscription.wanted.size > 0;
+    if (subscription.applied !== desired) {
+      subscription.inflight = { enabled: desired };
+      this.#queueRequest(
+        null,
+        "",
+        session,
+        { method: "resources/subscribe", timeoutMs: timeout },
+        { enabled: desired },
+        {
+          scope: { kind: "session" },
+          internal: (outcome) =>
+            this.#subscriptionSettled(session, desired, outcome),
+        },
+      );
+      return;
+    }
+    this.#settleWaiters(session);
+  }
+
+  #subscriptionSettled(
+    session: ProducerSession,
+    enabled: boolean,
+    outcome: InternalOutcome,
+  ): void {
+    const subscription = session.subscription;
+    if (session.closed) return;
+    subscription.inflight = null;
+    let failure: { code: string; message: string } | null = null;
+    if (outcome.kind === "result") {
+      const result = outcome.result;
+      if (isObject(result) && result.enabled === enabled) {
+        subscription.applied = enabled;
+      } else {
+        subscription.applied = isObject(result) &&
+            typeof result.enabled === "boolean"
+          ? result.enabled
+          : null;
+        failure = {
+          code: "invalid_request",
+          message:
+            "The producer returned a response that does not match the request.",
+        };
+      }
+    } else {
+      failure = { code: outcome.code, message: outcome.message };
+      if (outcome.unknown) subscription.applied = null;
+    }
+    if (failure) {
+      for (const waiter of [...subscription.waiters]) {
+        if (waiter.enabled !== enabled) continue;
+        // A client that already left is satisfied when others still want the
+        // subscription, which settles it below.
+        if (!waiter.enabled && subscription.wanted.size > 0) continue;
+        this.#endWaiter(session, waiter);
+        waiter.client.send({
+          type: "error",
+          id: waiter.browserId,
+          session: session.id,
+          ...failure,
+        });
+      }
+    }
+    // Waiters whose wish holds now are answered before any follow-up request.
+    this.#settleWaiters(session);
+    // A failure is not retried on its own; only a change of wishes starts
+    // another producer request.
+    if (!failure || (subscription.wanted.size > 0) !== enabled) {
+      this.#reconcile(session);
+    }
+  }
+
+  // Answers the waiters whose wish now holds. Called only while no producer
+  // request is outstanding.
+  #settleWaiters(session: ProducerSession): void {
+    const subscription = session.subscription;
+    for (const waiter of [...subscription.waiters]) {
+      const done = waiter.enabled
+        ? subscription.applied === true
+        : subscription.applied === false || subscription.wanted.size > 0;
+      if (!done) continue;
+      clearTimeout(waiter.timer);
+      subscription.waiters.splice(subscription.waiters.indexOf(waiter), 1);
+      if (waiter.enabled) subscription.confirmed.add(waiter.client);
+      waiter.client.send({
+        type: "response",
+        id: waiter.browserId,
+        session: session.id,
+        result: { enabled: waiter.enabled },
+        warnings: [],
+      });
+    }
+  }
+
   #cancelFromBrowser(client: BrowserClient, value: JsonObject): void {
     const session = typeof value.session === "string"
       ? this.#sessions.get(value.session)
       : undefined;
     if (!session || typeof value.id !== "string") return;
+    const waiter = session.subscription.waiters.find((item) =>
+      item.client === client && item.browserId === value.id
+    );
+    if (waiter) {
+      // Only the wait ends. A subscription that was dropped stays dropped, and
+      // one that was never confirmed is withdrawn.
+      this.#endWaiter(session, waiter);
+      client.send({
+        type: "cancelled",
+        id: waiter.browserId,
+        session: session.id,
+      });
+      this.#reconcile(session);
+      return;
+    }
     for (const pending of session.pending.values()) {
       if (pending.client === client && pending.browserId === value.id) {
         this.#cancelPending(session, pending, "browser_cancel");
@@ -1383,6 +1717,15 @@ export class Hub {
       pending.state = "expired";
       this.#finishPending(session, pending);
     }
+    const internal = pending.internal;
+    pending.internal = undefined;
+    internal?.({
+      kind: "error",
+      code: "timeout",
+      message:
+        "The producer did not complete this request before its deadline.",
+      unknown: wasSent,
+    });
     this.#scheduleDrain(session);
   }
 
@@ -1649,8 +1992,23 @@ export class Hub {
         code: "disconnected",
         message: "The producer connection closed.",
       });
+      pending.internal = undefined;
       this.#finishPending(session, pending);
     }
+    const subscription = session.subscription;
+    for (const waiter of subscription.waiters.splice(0)) {
+      clearTimeout(waiter.timer);
+      waiter.client.send({
+        type: "error",
+        id: waiter.browserId,
+        session: session.id,
+        code: "disconnected",
+        message: "The producer connection closed.",
+      });
+    }
+    subscription.wanted.clear();
+    subscription.confirmed.clear();
+    subscription.inflight = null;
     for (const view of session.views.values()) this.#streamCache.drop(view);
     session.views.clear();
     this.#sessions.delete(session.id);
@@ -1987,12 +2345,18 @@ function encodeBrowserBinary(
 }
 
 // The hello capabilities member is optional; when present it is an object whose
-// known members are Booleans. Unknown members are ignored.
+// known members are Booleans (`resource_changes: true` also needs `resources:
+// true`). Unknown members are ignored.
 function validCapabilities(value: unknown): boolean {
   if (value === undefined) return true;
   if (!isObject(value)) return false;
-  return !Object.hasOwn(value, "resources") ||
-    typeof value.resources === "boolean";
+  if (
+    Object.hasOwn(value, "resources") && typeof value.resources !== "boolean"
+  ) return false;
+  if (!Object.hasOwn(value, "resource_changes")) return true;
+  // Change notifications are an addition to the resource tree.
+  return typeof value.resource_changes === "boolean" &&
+    (value.resource_changes !== true || value.resources === true);
 }
 
 // A node id is a non-empty string of at most 16,384 UTF-8 bytes. The root is

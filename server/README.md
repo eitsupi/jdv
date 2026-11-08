@@ -326,6 +326,48 @@ request from the same client for the same session, node, and offset, so a
 request for another page stays queued. `resources/open` is never coalesced
 because every open creates a new view.
 
+A producer that declares `capabilities.resource_changes: true` (which requires
+`resources: true`; a hello that declares it without `resources`, or with a
+non-Boolean value, is rejected) can announce that its resource tree may have
+changed. A browser sends the session scope request `resources/subscribe` with
+`params: {"enabled": <Boolean>}` and no other member; the result is
+`{"enabled": <Boolean>}`. A session without the capability answers `unsupported`
+without contacting the producer. A client has at most one such request active at
+a time (another gets `busy`), and it uses the same request, queue, byte, ACK,
+wake, and deadline limits as the other session requests. The hub owns the
+subscription wishes of the browsers and keeps one producer-side subscription for
+the session:
+
+- The first subscriber makes the hub send `resources/subscribe` with
+  `enabled: true` to the producer, and the client gets its success only after
+  the producer succeeded. When the producer is already subscribed, the client is
+  answered without a producer request. A client that subscribes while the
+  producer is being changed waits for that request.
+- An unsubscribe takes effect for the client at once. When the last subscriber
+  leaves, by unsubscribing or by disconnecting, the hub sends `enabled: false`.
+  One client leaving never stops another one.
+- Only one producer request is outstanding. The hub compares what the clients
+  want with what the producer is known to be doing and sends the next request
+  when they differ, so a disconnect, `cancel`, or timeout while a request runs
+  is undone after it ends. A `cancel` or timeout of a subscribe withdraws that
+  client's wish, but a `cancel` or timeout of an unsubscribe only ends the wait
+  and the client stays unsubscribed. A producer request that times out leaves
+  the producer state unknown, and the hub then asks for the state it wants.
+- A producer error is returned to the clients waiting for that request and the
+  known producer state does not change. The hub does not retry on its own; the
+  next subscribe or unsubscribe starts a new request.
+- The subscription ends with the session, and it is not part of `welcome`.
+
+The producer's `resources/changed` notification is checked (the capability was
+declared and `params` is an object; unknown members are ignored) and is sent
+only to the clients whose subscribe succeeded, as
+`{"type": "notification", "session": <id>, "message": {"method":
+"resources/changed", "params": {}}}`.
+It is dropped when nobody is subscribed or the notification is malformed, and it
+never takes the generic notification path. It carries no view or generation and
+is neither stored nor replayed, so a client lists the tree after its subscribe
+succeeds and again when it receives the notification.
+
 Browser WebSocket input frames are limited to 64 KiB. Incoming producer JSONL
 frames are limited to 10 MiB.
 
