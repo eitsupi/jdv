@@ -514,3 +514,60 @@ Deno.test("a stale sweep response is discarded", () => {
   assert(p.stale);
   assertEquals(p.children.length, 300);
 });
+
+Deno.test("retrying a refresh whose first page failed sweeps the loaded range again", () => {
+  const { explorer, p } = loadedParent();
+  const failed = startLoad(explorer, p, 0, { refresh: true })!;
+  assert(failLoad(explorer, p, failed, "timeout"));
+  assertEquals(p.failedOffset, 0);
+  // The Retry button asks for the failed offset without any options.
+  const offsets: number[] = [];
+  let offset: number | null = p.failedOffset;
+  while (offset !== null) {
+    const token = startLoad(explorer, p, offset);
+    assert(token?.sweep, "The retry should continue as a sweep.");
+    offsets.push(offset);
+    const result = finishLoad(
+      explorer,
+      p,
+      token,
+      offset === 0
+        ? page(0, tables(0, 200), 200, 300)
+        : page(200, tables(200, 300), null, 300),
+    );
+    offset = result.continueAt;
+  }
+  assertEquals(offsets, [0, 200]);
+  assertEquals(p.children.length, 300);
+  assert(!hasMore(p));
+  assertEquals(p.sweep, null);
+});
+
+Deno.test("retrying a sweep page that failed halfway resumes at that page", () => {
+  const { explorer, p } = loadedParent();
+  const first = startLoad(explorer, p, 0, { refresh: true })!;
+  finishLoad(explorer, p, first, page(0, tables(0, 200), 200, 300));
+  const second = startLoad(explorer, p, 200)!;
+  assert(failLoad(explorer, p, second, "timeout"));
+  assertEquals(p.failedOffset, 200);
+  // The listing on screen is untouched while the sweep waits for the retry.
+  assertEquals(p.children.length, 300);
+  const retry = startLoad(explorer, p, p.failedOffset)!;
+  assert(retry.sweep);
+  finishLoad(explorer, p, retry, page(200, tables(200, 300), null, 300));
+  assertEquals(p.children.length, 300);
+  assertEquals(p.sweep, null);
+});
+
+Deno.test("retrying an ordinary failed load is not a sweep", () => {
+  const explorer = createExplorer();
+  const failed = startLoad(explorer, explorer.root, 0)!;
+  assert(failLoad(explorer, explorer.root, failed, "boom"));
+  const retry = startLoad(explorer, explorer.root, explorer.root.failedOffset)!;
+  assertEquals(retry.sweep, false);
+  // A loaded node whose plain reload failed is not turned into a sweep either.
+  const { explorer: loaded, p } = loadedParent();
+  const reload = startLoad(loaded, p, 0)!;
+  assert(failLoad(loaded, p, reload, "boom"));
+  assertEquals(startLoad(loaded, p, p.failedOffset)!.sweep, false);
+});

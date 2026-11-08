@@ -176,7 +176,9 @@ export function startLoad(explorer, node, offset, options = {}) {
     node.generation++;
     cancelId = node.requestId;
     node.stale = false;
-    node.sweep = options.refresh && node.loaded
+    // A sweep left behind by a failed first page is retried as a sweep: only
+    // a failure keeps `node.sweep` set when a fetch starts at offset 0.
+    node.sweep = (options.refresh || node.sweep) && node.loaded
       ? { end: node.loadedEnd, children: [], seen: new Set(), nextOffset: 0 }
       : null;
   } else if (node.sweep) {
