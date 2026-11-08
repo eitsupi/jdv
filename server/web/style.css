@@ -17,6 +17,107 @@ main {
   padding: 0 1.25rem 2rem;
 }
 
+/* The Resource Tree explorer sits in a sidebar on wide screens and in a
+   height-limited, collapsible panel above the viewer on narrow ones. Without
+   an explorer the workspace is a single full-width column. */
+.workspace {
+  display: block;
+  min-width: 0;
+}
+
+.workspace-main {
+  min-width: 0;
+}
+
+.resources-panel {
+  box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas);
+  border-radius: 0.5rem;
+  margin: 1.25rem 0;
+  padding: 0.25rem 0.75rem;
+}
+
+.resources-panel[hidden] {
+  display: none;
+}
+
+.resources-panel > summary {
+  cursor: pointer;
+  font-weight: 650;
+  padding: 0.35rem 0;
+}
+
+.resources-panel > #resources {
+  box-sizing: border-box;
+  max-height: min(40vh, 24rem);
+  overflow: auto;
+  margin: 0 0 0.5rem;
+}
+
+.resources-panel .resource-children .resource-children {
+  margin-left: 0.25rem;
+  padding-left: 0.5rem;
+}
+
+.resources-panel .resource-row {
+  gap: 0.35rem;
+}
+
+.resources-panel .resource-row button {
+  padding: 0.05rem 0.4rem;
+}
+
+.resources-panel .resource-explorer {
+  border: 0;
+  margin: 0;
+  padding: 0 0 0.5rem;
+}
+
+@media (min-width: 56.25rem) {
+  /* The sidebar takes the whole left column, header included, so it fits the
+     viewport from the top of the page; everything else moves to the right
+     column. The wrappers disappear from the grid so their children are laid
+     out directly. */
+  main:has(.workspace.has-sidebar) {
+    display: grid;
+    grid-template-columns: 24rem minmax(0, 1fr);
+    grid-template-rows: repeat(12, auto);
+    column-gap: 1.5rem;
+    align-content: start;
+    max-width: 96rem;
+  }
+
+  main:has(.workspace.has-sidebar) > header,
+  main:has(.workspace.has-sidebar) > #status,
+  .workspace.has-sidebar > .workspace-main > * {
+    grid-column: 2;
+  }
+
+  .workspace.has-sidebar,
+  .workspace.has-sidebar > .workspace-main {
+    display: contents;
+  }
+
+  .workspace.has-sidebar > .resources-panel {
+    grid-column: 1;
+    grid-row: 1 / -1;
+    align-self: start;
+    position: sticky;
+    top: 1rem;
+    margin: 0;
+  }
+
+  .workspace.has-sidebar > .resources-panel > summary {
+    display: none;
+  }
+
+  .workspace.has-sidebar > .resources-panel > #resources {
+    max-height: calc(100vh - 7rem);
+    margin: 0.5rem 0;
+    overflow: auto;
+  }
+}
+
 h1 {
   margin-bottom: 0;
 }
@@ -351,6 +452,459 @@ legend {
   align-items: center;
   flex-wrap: wrap;
   gap: 0.75rem;
+}
+
+.resource-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0.75rem;
+  background: Canvas;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, Canvas);
+}
+
+.resource-header h3,
+.resource-header p {
+  margin: 0;
+}
+
+.resource-header .resource-controls {
+  flex-basis: 100%;
+}
+
+.resource-header .resource-status {
+  flex-basis: 100%;
+}
+
+.resource-header .resource-status[hidden] {
+  display: none;
+}
+
+/* Scrolling a row into view must not leave it under the pinned header. */
+#resources {
+  scroll-padding-top: 6rem;
+}
+
+.resource-children {
+  margin-left: 0.25rem;
+  padding-left: 0.5rem;
+}
+
+.resources-panel .resource-row {
+  gap: 0.35rem;
+}
+
+.resources-panel .resource-row button {
+  padding: 0.05rem 0.4rem;
+}
+
+.resources-panel .resource-explorer {
+  border: 0;
+  margin: 0;
+  padding: 0 0 0.5rem;
+}
+
+@media (min-width: 56.25rem) {
+  /* The sidebar takes the whole left column, header included, so it fits the
+     viewport from the top of the page; everything else moves to the right
+     column. The wrappers disappear from the grid so their children are laid
+     out directly. */
+  main:has(.workspace.has-sidebar) {
+    display: grid;
+    grid-template-columns: 24rem minmax(0, 1fr);
+    grid-template-rows: repeat(12, auto);
+    column-gap: 1.5rem;
+    align-content: start;
+    max-width: 96rem;
+  }
+
+  main:has(.workspace.has-sidebar) > header,
+  main:has(.workspace.has-sidebar) > #status,
+  .workspace.has-sidebar > .workspace-main > * {
+    grid-column: 2;
+  }
+
+  .workspace.has-sidebar,
+  .workspace.has-sidebar > .workspace-main {
+    display: contents;
+  }
+
+  .workspace.has-sidebar > .resources-panel {
+    grid-column: 1;
+    grid-row: 1 / -1;
+    align-self: start;
+    position: sticky;
+    top: 1rem;
+    margin: 0;
+  }
+
+  .workspace.has-sidebar > .resources-panel > summary {
+    display: none;
+  }
+
+  .workspace.has-sidebar > .resources-panel > #resources {
+    max-height: calc(100vh - 7rem);
+    margin: 0.5rem 0;
+    overflow: auto;
+  }
+}
+
+h1 {
+  margin-bottom: 0;
+}
+
+header p,
+.muted {
+  color: color-mix(in srgb, CanvasText 65%, Canvas);
+}
+
+section {
+  margin: 1.25rem 0;
+}
+
+#status {
+  border-left: 0.25rem solid color-mix(in srgb, CanvasText 35%, Canvas);
+  padding: 0.55rem 0.75rem;
+}
+
+#status[data-state="error"] {
+  border-color: #c43b3b;
+}
+
+#status[data-state="busy"],
+#status[data-state="loading"] {
+  border-color: #c58b20;
+}
+
+article {
+  border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas);
+  border-radius: 0.5rem;
+  margin: 0.75rem 0;
+  padding: 0.75rem 1rem;
+}
+
+article h3,
+article p {
+  margin: 0 0 0.35rem;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled,
+select:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.table-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.table-heading h2,
+.table-heading p {
+  margin: 0;
+}
+
+#tree-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  list-style: none;
+  margin: 0.75rem 0;
+  padding: 0;
+}
+
+#tree-breadcrumb li:not(:last-child)::after {
+  content: "/";
+  margin-left: 0.35rem;
+  color: color-mix(in srgb, CanvasText 55%, Canvas);
+}
+
+#tree-child-list {
+  display: grid;
+  gap: 0.4rem;
+  list-style: none;
+  margin: 0.75rem 0;
+  padding: 0;
+}
+
+#tree-child-list li {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, Canvas);
+  padding: 0.45rem 0.25rem;
+}
+
+.tree-summary,
+.tree-unavailable {
+  overflow-wrap: anywhere;
+}
+
+.tree-unavailable {
+  color: #b45309;
+}
+
+.tree-options {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.5rem 0;
+}
+
+.tree-options[hidden] {
+  display: none;
+}
+
+.tree-pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.query-tools {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 28rem), 1fr));
+  gap: 0.75rem;
+}
+
+fieldset {
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, CanvasText 25%, Canvas);
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+}
+
+legend {
+  font-weight: 650;
+}
+
+.control-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.35rem 0;
+}
+
+.control-row select,
+.control-row input {
+  min-width: 8rem;
+  max-width: 100%;
+}
+
+.filter-values input:first-of-type {
+  flex: 1 1 12rem;
+}
+
+#sort-list {
+  margin: 0.5rem 0 0;
+  padding-left: 1.5rem;
+}
+
+#sort-list li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.35rem 0;
+}
+
+#sort-list li span {
+  flex: 1 1 12rem;
+}
+
+#warnings {
+  margin: 0.75rem 0;
+  padding-left: 1.5rem;
+  color: #b45309;
+}
+
+#warnings [data-state="error"] {
+  color: #c43b3b;
+}
+
+.table-pagination {
+  min-height: 2.5rem;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.table-pagination .tabulator-footer {
+  box-sizing: border-box;
+  width: 100%;
+  border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas);
+  border-top: 0;
+}
+
+.column-scroller {
+  position: relative;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas);
+  border-radius: 0.35rem;
+  height: 462px;
+  min-height: 462px;
+  max-height: 462px;
+}
+
+.column-spacer {
+  position: relative;
+  height: 462px;
+  min-height: 462px;
+}
+
+.column-window {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 462px;
+  min-height: 462px;
+  transition: opacity 100ms ease;
+}
+
+.column-window.is-loading-window {
+  opacity: 0.35;
+}
+
+#column-window .tabulator-header .tabulator-col[tabulator-field="source_row"],
+#column-window .tabulator-row .tabulator-cell[tabulator-field="source_row"] {
+  transform: translateX(var(--row-horizontal-compensation, 0px));
+  z-index: 12;
+  border-right: 2px solid #aaa;
+}
+
+#column-window .tabulator-header .tabulator-col[tabulator-field="source_row"] {
+  background-color: #e2e2e2;
+}
+
+#column-window .tabulator-row-odd .tabulator-cell[tabulator-field="source_row"] {
+  background-color: #fff;
+}
+
+#column-window .tabulator-row-even .tabulator-cell[tabulator-field="source_row"] {
+  background-color: #efefef;
+}
+
+.tabulator {
+  font-size: 0.9rem;
+}
+
+.tabulator .tabulator-header .tabulator-col .tabulator-col-title {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.tabulator-cell {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 48rem) {
+  main {
+    margin-top: 1rem;
+    padding-inline: 0.75rem;
+  }
+
+  .table-pagination {
+    min-height: 2.5rem;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .table-pagination .tabulator-footer {
+    box-sizing: border-box;
+    width: 100%;
+    border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas);
+    border-top: 0;
+  }
+
+  .column-scroller {
+    min-height: 24rem;
+  }
+}
+
+#view-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  list-style: none;
+  padding: 0;
+}
+.drillable-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.drillable-cell button {
+  margin-left: auto;
+  font-size: 0.8rem;
+  padding: 0.1rem 0.3rem;
+}
+#child-open-status[data-state="waiting"] {
+  color: #966000;
+}
+#child-open-status[data-state="error"] {
+  color: #c43b3b;
+}
+
+.track-state {
+  font-size: 0.85em;
+}
+
+.resource-explorer .resource-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.resource-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: Canvas;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, Canvas);
+}
+
+.resource-header h3,
+.resource-header p {
+  margin: 0 0 0.2rem;
+}
+
+.resource-header .resource-status[hidden] {
+  display: none;
 }
 
 .resource-children {

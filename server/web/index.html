@@ -19,104 +19,115 @@
       <section id="status" aria-live="polite" data-state="loading">
         Connecting to the local viewer…
       </section>
-      <section id="sessions" aria-label="Producer sessions"></section>
-      <section id="resources" aria-label="Resource trees"></section>
-      <section id="tables" aria-label="Open tables"></section>
-      <nav aria-label="View history">
-        <ol id="view-breadcrumb"></ol>
-      </nav>
-      <p id="child-open-status" aria-live="polite" hidden></p>
-      <section id="viewer" aria-label="Table viewer" hidden>
-        <div class="table-heading">
-          <div>
-            <h2 id="table-title"></h2>
-            <p id="table-meta" class="muted"></p>
-          </div>
-          <button id="refresh-view" type="button" hidden>Refresh</button>
-          <span id="track-state" class="track-state muted" hidden></span>
-          <button id="track-view" type="button" hidden></button>
-          <button id="tree-return" type="button" hidden>Back to parent</button>
-        </div>
-        <div class="query-tools">
-          <fieldset>
-            <legend>Stable sort</legend>
-            <div class="control-row">
-              <label for="sort-column">Column</label>
-              <select id="sort-column"></select>
-              <label for="sort-direction">Direction</label>
-              <select id="sort-direction">
-                <option value="asc">Ascending</option>
-                <option value="desc">Descending</option>
-              </select>
-              <button id="sort-add" type="button">Add sort</button>
+      <div id="workspace" class="workspace">
+        <details id="resources-panel" class="resources-panel" open hidden>
+          <summary>Resource explorer</summary>
+          <section id="resources" aria-label="Resource trees"></section>
+        </details>
+        <div class="workspace-main">
+          <section id="sessions" aria-label="Producer sessions"></section>
+          <section id="tables" aria-label="Open tables"></section>
+          <nav aria-label="View history">
+            <ol id="view-breadcrumb"></ol>
+          </nav>
+          <p id="child-open-status" aria-live="polite" hidden></p>
+          <section id="viewer" aria-label="Table viewer" hidden>
+            <div class="table-heading">
+              <div>
+                <h2 id="table-title"></h2>
+                <p id="table-meta" class="muted"></p>
+              </div>
+              <button id="refresh-view" type="button" hidden>Refresh</button>
+              <span id="track-state" class="track-state muted" hidden></span>
+              <button id="track-view" type="button" hidden></button>
+              <button id="tree-return" type="button"
+                hidden>Back to parent</button>
             </div>
-            <ol id="sort-list"></ol>
-          </fieldset>
-          <fieldset>
-            <legend>Filter</legend>
-            <div class="control-row">
-              <label for="filter-column">Column</label>
-              <select id="filter-column"></select>
-              <label for="filter-op">Operation</label>
-              <select id="filter-op"></select>
+            <div class="query-tools">
+              <fieldset>
+                <legend>Stable sort</legend>
+                <div class="control-row">
+                  <label for="sort-column">Column</label>
+                  <select id="sort-column"></select>
+                  <label for="sort-direction">Direction</label>
+                  <select id="sort-direction">
+                    <option value="asc">Ascending</option>
+                    <option value="desc">Descending</option>
+                  </select>
+                  <button id="sort-add" type="button">Add sort</button>
+                </div>
+                <ol id="sort-list"></ol>
+              </fieldset>
+              <fieldset>
+                <legend>Filter</legend>
+                <div class="control-row">
+                  <label for="filter-column">Column</label>
+                  <select id="filter-column"></select>
+                  <label for="filter-op">Operation</label>
+                  <select id="filter-op"></select>
+                </div>
+                <div class="control-row filter-values">
+                  <label class="visually-hidden"
+                    for="filter-value">Value</label>
+                  <input id="filter-value" type="text" autocomplete="off">
+                  <label class="visually-hidden"
+                    for="filter-upper">Upper value</label>
+                  <input id="filter-upper" type="text" autocomplete="off"
+                    hidden>
+                  <button id="filter-apply" type="button">Apply filter</button>
+                  <button id="filter-clear" type="button">Clear</button>
+                </div>
+                <p id="filter-help" class="muted" aria-live="polite"></p>
+              </fieldset>
             </div>
-            <div class="control-row filter-values">
-              <label class="visually-hidden" for="filter-value">Value</label>
-              <input id="filter-value" type="text" autocomplete="off">
-              <label class="visually-hidden"
-                for="filter-upper">Upper value</label>
-              <input id="filter-upper" type="text" autocomplete="off" hidden>
-              <button id="filter-apply" type="button">Apply filter</button>
-              <button id="filter-clear" type="button">Clear</button>
-            </div>
-            <p id="filter-help" class="muted" aria-live="polite"></p>
-          </fieldset>
-        </div>
-        <div id="sequential-controls" hidden>
-          <button id="sequential-next" type="button">Load next</button>
-          <button id="sequential-earlier" type="button" hidden>
+            <div id="sequential-controls" hidden>
+              <button id="sequential-next" type="button">Load next</button>
+              <button id="sequential-earlier" type="button" hidden>
             Load earlier cached rows
           </button>
-          <span id="sequential-progress" aria-live="polite"></span>
-          <p id="sequential-notice" class="muted" aria-live="polite"></p>
-        </div>
-        <ul id="warnings" aria-live="polite"></ul>
-        <div class="column-scroller" id="column-viewport"
-          aria-label="Scrollable table columns">
-          <div id="column-spacer" class="column-spacer">
-            <div id="column-window" class="column-window"></div>
-          </div>
-        </div>
-        <div id="table-pagination" class="table-pagination"
-          aria-label="Table pages"></div>
-      </section>
-      <section id="tree-viewer" aria-label="Object tree viewer" hidden>
-        <div class="table-heading">
-          <div>
-            <h2 id="tree-title"></h2>
-            <p id="tree-meta" class="muted"></p>
-          </div>
-          <button id="tree-refresh" type="button" hidden>Refresh</button>
-          <span id="tree-track-state" class="track-state muted" hidden></span>
-          <button id="tree-track" type="button" hidden></button>
-          <button id="tree-parent-return" type="button" hidden>
+              <span id="sequential-progress" aria-live="polite"></span>
+              <p id="sequential-notice" class="muted" aria-live="polite"></p>
+            </div>
+            <ul id="warnings" aria-live="polite"></ul>
+            <div class="column-scroller" id="column-viewport"
+              aria-label="Scrollable table columns">
+              <div id="column-spacer" class="column-spacer">
+                <div id="column-window" class="column-window"></div>
+              </div>
+            </div>
+            <div id="table-pagination" class="table-pagination"
+              aria-label="Table pages"></div>
+          </section>
+          <section id="tree-viewer" aria-label="Object tree viewer" hidden>
+            <div class="table-heading">
+              <div>
+                <h2 id="tree-title"></h2>
+                <p id="tree-meta" class="muted"></p>
+              </div>
+              <button id="tree-refresh" type="button" hidden>Refresh</button>
+              <span id="tree-track-state" class="track-state muted"
+                hidden></span>
+              <button id="tree-track" type="button" hidden></button>
+              <button id="tree-parent-return" type="button" hidden>
             Back to parent
           </button>
-        </div>
-        <nav aria-label="Object path">
-          <ol id="tree-breadcrumb"></ol>
-        </nav>
-        <label id="tree-attributes-label" class="tree-options">
+            </div>
+            <nav aria-label="Object path">
+              <ol id="tree-breadcrumb"></ol>
+            </nav>
+            <label id="tree-attributes-label" class="tree-options">
           <input id="tree-attributes" type="checkbox" checked>
           Show attributes
         </label>
-        <ul id="tree-child-list" aria-label="Object children"></ul>
-        <div class="tree-pagination" aria-label="Object child pages">
-          <button id="tree-previous" type="button">Previous</button>
-          <span id="tree-page-label" class="muted"></span>
-          <button id="tree-next" type="button">Next</button>
+            <ul id="tree-child-list" aria-label="Object children"></ul>
+            <div class="tree-pagination" aria-label="Object child pages">
+              <button id="tree-previous" type="button">Previous</button>
+              <span id="tree-page-label" class="muted"></span>
+              <button id="tree-next" type="button">Next</button>
+            </div>
+          </section>
         </div>
-      </section>
+      </div>
     </main>
   </body>
 </html>

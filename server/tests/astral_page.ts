@@ -374,8 +374,12 @@ export async function clickButton(
             (el.getAttribute("aria-label") ?? el.textContent)?.trim() ===
               args.label
           );
-        const rect = target?.getBoundingClientRect();
-        if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+        if (!target) return null;
+        // Scroll on every poll: content rendered later can move the button
+        // out of the viewport after an earlier scroll.
+        target.scrollIntoView({ block: "center", inline: "nearest" });
+        const rect = target.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return null;
         const x = rect.left + rect.width / 2;
         const y = rect.top + rect.height / 2;
         return x >= 0 && x < innerWidth && y >= 0 && y < innerHeight

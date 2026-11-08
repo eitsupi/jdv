@@ -14,6 +14,7 @@ import {
   hasMore,
   hiddenCount,
   nodeFor as typedNodeFor,
+  nodeIdOf,
   normalizeKind,
   refreshAll,
   rowLabel,
@@ -177,7 +178,7 @@ Deno.test("a refresh makes an older response obsolete", () => {
 
 Deno.test("collapsing retires the fetch in flight", () => {
   const explorer = createExplorer();
-  const node = nodeFor(explorer, "n", entry("n", { has_children: true }));
+  const node = nodeFor(explorer, ["n"], entry("n", { has_children: true }));
   assert(expand(explorer, node));
   const token = startLoad(explorer, node, 0)!;
   node.requestId = "req-2";
@@ -199,7 +200,7 @@ Deno.test("refresh targets the visible expanded nodes and marks the rest stale",
     0,
     page(0, [entry("p", { has_children: true })]),
   );
-  const p = nodeFor(explorer, "p");
+  const p = nodeFor(explorer, ["p"]);
   expand(explorer, p);
   load(
     explorer,
@@ -210,8 +211,8 @@ Deno.test("refresh targets the visible expanded nodes and marks the rest stale",
       entry("r", { has_children: true }),
     ]),
   );
-  const q = nodeFor(explorer, "q");
-  const r = nodeFor(explorer, "r");
+  const q = nodeFor(explorer, ["p", "q"]);
+  const r = nodeFor(explorer, ["p", "r"]);
   // Sibling nodes are expanded at the same time.
   expand(explorer, q);
   expand(explorer, r);
@@ -240,7 +241,7 @@ Deno.test("a refresh drops the state of nodes that disappeared", () => {
       entry("gone", { has_children: true }),
     ]),
   );
-  const gone = nodeFor(explorer, "gone");
+  const gone = nodeFor(explorer, ["gone"]);
   gone.requestId = "req-3";
   gone.loading = true;
   const result = load(
@@ -252,8 +253,8 @@ Deno.test("a refresh drops the state of nodes that disappeared", () => {
     ]),
   );
   assertEquals(result.cancelIds, ["req-3"]);
-  assert(!explorer.nodes.has("gone"));
-  assert(explorer.nodes.has("keep"));
+  assert(!explorer.nodes.has(JSON.stringify(["gone"])));
+  assert(explorer.nodes.has(JSON.stringify(["keep"])));
 });
 
 Deno.test("an invalid page is rejected and a closed explorer ignores responses", () => {
@@ -297,4 +298,219 @@ Deno.test("resource views stay recognized across generations until closed", () =
   tracker.note("t", { view: "a", generation: 1, reason: "resource" });
   tracker.forgetSession("s");
   assert(!tracker.has("s", "a") && tracker.has("t", "a"));
+});
+
+const key = (...path: string[]) => JSON.stringify(path);
+const dir = (id: string) => entry(id, { has_children: true, viewable: false });
+const tables = (from: number, to: number) =>
+  Array.from({ length: to - from }, (_, index) => dir(`n${from + index}`));
+
+// Runs a refresh the way the viewer does: sweep requests until no more.
+function sweep(
+  explorer: Any,
+  node: Any,
+  answer: (offset: number) => unknown,
+): string[] {
+  const offsets: string[] = [];
+  let offset: number | null = 0;
+  while (offset !== null) {
+    const token = startLoad(explorer, node, offset, { refresh: true });
+    assert(token, `The sweep should request offset ${offset}.`);
+    offsets.push(String(offset));
+    const result = finishLoad(explorer, node, token, answer(offset));
+    assert(result.applied);
+    offset = result.continueAt;
+  }
+  return offsets;
+}
+
+function loadedParent() {
+  const explorer = createExplorer();
+  const root = explorer.root;
+  load(explorer, root, 0, page(0, [dir("p")], null, 1));
+  const p = nodeFor(explorer, ["p"]);
+  expand(explorer, p);
+  load(explorer, p, 0, page(0, tables(0, 200), 200, 300));
+  load(explorer, p, 200, page(200, tables(200, 300), null, 300));
+  return { explorer, root, p };
+}
+
+Deno.test("a refresh reads the loaded pages again and keeps the state of a node on page two", () => {
+  const { explorer, root, p } = loadedParent();
+  // Node 220 lives on the second page and is expanded.
+  const deep = nodeFor(explorer, ["p", "n220"], dir("n220"));
+  expand(explorer, deep);
+  load(explorer, deep, 0, page(0, [entry("leaf")]));
+  const { targets } = refreshAll(explorer);
+  assertEquals(targets.length, 3);
+  assert(
+    targets.includes(root) && targets.includes(p) && targets.includes(deep),
+  );
+  const offsets = sweep(
+    explorer,
+    p,
+    (offset) =>
+      offset === 0
+        ? page(0, tables(0, 200), 200, 300)
+        : page(200, tables(200, 300), null, 300),
+  );
+  assertEquals(offsets, ["0", "200"]);
+  assertEquals(p.children.length, 300);
+  assert(!hasMore(p));
+  assert(deep.expanded && deep.loaded);
+  assertEquals(deep.children.length, 1);
+  assert(explorer.nodes.has(key("p", "n220")));
+});
+
+Deno.test("the listing stays whole until the sweep has finished", () => {
+  const { explorer, p } = loadedParent();
+  const first = startLoad(explorer, p, 0, { refresh: true })!;
+  const result = finishLoad(
+    explorer,
+    p,
+    first,
+    page(0, tables(0, 200), 200, 300),
+  );
+  assertEquals(result.continueAt, 200);
+  assertEquals(p.children.length, 300);
+  // A refresh in progress does not allow Load more or another page.
+  assertEquals(startLoad(explorer, p, 5), null);
+  const second = startLoad(explorer, p, 200, { refresh: true })!;
+  finishLoad(explorer, p, second, page(200, tables(200, 300), null, 300));
+  assertEquals(p.children.length, 300);
+});
+
+Deno.test("only nodes missing from the fully re-read listing are dropped", () => {
+  const { explorer, p } = loadedParent();
+  for (const id of ["n10", "n220", "n290"]) {
+    const record = nodeFor(explorer, ["p", id], dir(id));
+    expand(explorer, record);
+  }
+  // n220 is gone; the rest of the listing, including n290, is still there.
+  const fresh = [...tables(0, 220), ...tables(221, 300)];
+  const offsets = sweep(
+    explorer,
+    p,
+    (offset) =>
+      offset === 0
+        ? page(0, fresh.slice(0, 200), 200, 299)
+        : page(200, fresh.slice(200), null, 299),
+  );
+  assertEquals(offsets, ["0", "200"]);
+  assert(explorer.nodes.has(key("p", "n10")));
+  assert(explorer.nodes.has(key("p", "n290")));
+  assert(!explorer.nodes.has(key("p", "n220")));
+});
+
+Deno.test("a refresh that reads only part of a listing drops nothing", () => {
+  const { explorer, p } = loadedParent();
+  const deep = nodeFor(explorer, ["p", "n250"], dir("n250"));
+  expand(explorer, deep);
+  // A plain first-page fetch with more pages to come cannot prove deletions.
+  load(explorer, p, 0, page(0, tables(0, 200), 200, 300));
+  assertEquals(p.children.length, 200);
+  assert(explorer.nodes.has(key("p", "n250")));
+  assert(deep.expanded);
+  // The state is back once the node is listed again.
+  load(explorer, p, 200, page(200, tables(200, 300), null, 300));
+  assert(explorer.nodes.has(key("p", "n250")));
+  // When the listing ends without it, the record is discarded.
+  load(explorer, p, 0, page(0, tables(0, 100), null, 100));
+  assert(!explorer.nodes.has(key("p", "n250")));
+});
+
+Deno.test("a sweep goes on until an expanded node that moved is found again", () => {
+  const { explorer, p } = loadedParent();
+  const moved = nodeFor(explorer, ["p", "n5"], dir("n5"));
+  expand(explorer, moved);
+  // n5 moved to the end of a listing that has grown past what was loaded.
+  const fresh = [...tables(0, 5), ...tables(6, 300), dir("n5")];
+  const offsets = sweep(
+    explorer,
+    p,
+    (offset) =>
+      offset === 0
+        ? page(0, fresh.slice(0, 200), 200, 300)
+        : page(200, fresh.slice(200), null, 300),
+  );
+  assertEquals(offsets, ["0", "200"]);
+  assert(moved.expanded);
+  assertEquals(p.children.length, 300);
+  assertEquals(p.children[299].id, "n5");
+});
+
+Deno.test("a node listed under two parents has independent state", () => {
+  const explorer = createExplorer();
+  load(explorer, explorer.root, 0, page(0, [dir("a"), dir("b")], null, 2));
+  const a = nodeFor(explorer, ["a"]);
+  const b = nodeFor(explorer, ["b"]);
+  expand(explorer, a);
+  expand(explorer, b);
+  load(explorer, a, 0, page(0, [dir("shared"), dir("only_a")]));
+  load(explorer, b, 0, page(0, [dir("shared")]));
+  const underA = nodeFor(explorer, ["a", "shared"]);
+  const underB = nodeFor(explorer, ["b", "shared"]);
+  assert(underA !== underB);
+  assertEquals(nodeIdOf(underA), "shared");
+  assertEquals(nodeIdOf(explorer.root), null);
+  expand(explorer, underA);
+  assert(underA.expanded && !underB.expanded);
+  expand(explorer, underB);
+  load(explorer, underB, 0, page(0, [entry("leaf")]));
+  collapse(underA);
+  assert(!underA.expanded && underB.expanded && underB.loaded);
+  // Dropping it from one parent leaves the other alone.
+  load(explorer, a, 0, page(0, [dir("only_a")]));
+  assert(!explorer.nodes.has(key("a", "shared")));
+  assert(explorer.nodes.has(key("b", "shared")));
+  assert(underB.expanded);
+  assertEquals(underB.children.length, 1);
+  // A refresh walks both parents' expanded copies separately.
+  expand(explorer, nodeFor(explorer, ["a", "only_a"]));
+  const { targets } = refreshAll(explorer);
+  assert(targets.includes(underB));
+  assertEquals(targets.length, 5);
+});
+
+Deno.test("dropping a node drops its subtree and cancels its fetches", () => {
+  const explorer = createExplorer();
+  load(explorer, explorer.root, 0, page(0, [dir("a"), dir("keep")], null, 2));
+  const a = nodeFor(explorer, ["a"]);
+  expand(explorer, a);
+  load(explorer, a, 0, page(0, [dir("inner")]));
+  const inner = nodeFor(explorer, ["a", "inner"]);
+  expand(explorer, inner);
+  startLoad(explorer, inner, 0);
+  inner.requestId = "req-inner";
+  const result = load(
+    explorer,
+    explorer.root,
+    0,
+    page(0, [dir("keep")], null, 1),
+  );
+  assertEquals(result.cancelIds, ["req-inner"]);
+  assert(
+    !explorer.nodes.has(key("a")) && !explorer.nodes.has(key("a", "inner")),
+  );
+});
+
+Deno.test("a stale sweep response is discarded", () => {
+  const { explorer, p } = loadedParent();
+  const old = startLoad(explorer, p, 0, { refresh: true })!;
+  const newer = startLoad(explorer, p, 0, { refresh: true })!;
+  const stale = finishLoad(explorer, p, old, page(0, tables(0, 200), 200, 300));
+  assertEquals(stale.applied, false);
+  assertEquals(stale.continueAt, null);
+  assert(
+    finishLoad(explorer, p, newer, page(0, tables(0, 200), 200, 300)).applied,
+  );
+  // Collapsing mid-sweep retires it and leaves the node stale.
+  const third = startLoad(explorer, p, 200, { refresh: true })!;
+  collapse(p);
+  assertEquals(
+    finishLoad(explorer, p, third, page(200, tables(200, 300))).applied,
+    false,
+  );
+  assert(p.stale);
+  assertEquals(p.children.length, 300);
 });

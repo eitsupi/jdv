@@ -278,7 +278,7 @@ Deno.test({
             (globalThis as unknown as { document: BrowserDocument }).document
               .querySelectorAll("#resources .resource-note").length === 0,
         );
-        await click(page, '#tables [data-action="close-view"]');
+        await clickButton(page, "Close view", "#tables article");
         await waitFor(
           page,
           () =>
@@ -387,6 +387,239 @@ Deno.test({
         );
         assertEquals(await count(page, "#resources .resource-explorer"), 0);
         assertEquals(harness.producer.resourceRequests.length, 0);
+      });
+      assertEquals(pageErrors, []);
+    } finally {
+      await finishIntegrationCleanup([
+        () => page?.close(),
+        () => owned?.close(),
+        () => harness.close(),
+      ]);
+    }
+  },
+});
+
+type Box = { left: number; top: number; right: number; bottom: number };
+
+type Layout = {
+  panel: Box;
+  explorer: Box;
+  explorerScrolls: boolean;
+  tables: Box;
+  viewer: Box;
+  innerHeight: number;
+  innerWidth: number;
+  open: boolean;
+  summaryHidden: boolean;
+  documentWidth: number;
+};
+
+function layout(page: Page): Promise<Layout> {
+  return evaluate(page, () => {
+    const doc = (globalThis as unknown as {
+      document: {
+        querySelector(selector: string): {
+          getBoundingClientRect(): Box;
+          scrollHeight: number;
+          clientHeight: number;
+          open: boolean;
+        } | null;
+        documentElement: { scrollWidth: number };
+      };
+    }).document;
+    const win = globalThis as unknown as {
+      innerHeight: number;
+      innerWidth: number;
+      scrollY: number;
+      getComputedStyle(element: unknown): { display: string };
+    };
+    // Positions are relative to the document, so scrolling does not matter.
+    const box = (selector: string): Box => {
+      const rect = doc.querySelector(selector)!.getBoundingClientRect();
+      return {
+        left: rect.left,
+        top: rect.top + win.scrollY,
+        right: rect.right,
+        bottom: rect.bottom + win.scrollY,
+      };
+    };
+    const explorer = doc.querySelector("#resources")!;
+    return {
+      panel: box("#resources-panel"),
+      explorer: box("#resources"),
+      explorerScrolls: explorer.scrollHeight > explorer.clientHeight,
+      tables: box("#sessions"),
+      viewer: box("#viewer"),
+      innerHeight: win.innerHeight,
+      innerWidth: win.innerWidth,
+      open: doc.querySelector("#resources-panel")!.open,
+      summaryHidden: win.getComputedStyle(
+        doc.querySelector("#resources-panel > summary"),
+      ).display === "none",
+      documentWidth: doc.documentElement.scrollWidth,
+    };
+  });
+}
+
+// Scrolls the explorer list to its end and reports whether the Refresh button
+// is still inside the visible part of the scroll area.
+function scrollExplorerToEnd(page: Page): Promise<boolean> {
+  return evaluate(page, () => {
+    const doc = (globalThis as unknown as {
+      document: {
+        querySelector(selector: string): {
+          scrollTop: number;
+          scrollHeight: number;
+          getBoundingClientRect(): Box;
+        } | null;
+      };
+    }).document;
+    const area = doc.querySelector("#resources")!;
+    area.scrollTop = area.scrollHeight;
+    const button = doc.querySelector(
+      '#resources [data-action="refresh-resources"]',
+    )!.getBoundingClientRect();
+    const box = area.getBoundingClientRect();
+    return button.top >= box.top - 1 && button.bottom <= box.bottom + 1 &&
+      area.scrollTop > 0;
+  });
+}
+
+function scrollPageToTop(page: Page) {
+  return evaluate(
+    page,
+    () =>
+      (globalThis as unknown as { scrollTo(x: number, y: number): void })
+        .scrollTo(0, 0),
+  );
+}
+
+Deno.test({
+  name:
+    "The explorer is a sidebar on wide screens and a bounded panel on narrow ones",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const harness = await NonRProducerHarness.start({
+      capabilities: { resources: true },
+    });
+    let owned: Awaited<ReturnType<typeof launch>> | undefined;
+    let page: Page | undefined;
+    const pageErrors: string[] = [];
+    const shotDir = Deno.env.get("JDV_TEST_SCREENSHOT_DIR");
+    try {
+      owned = await launch();
+      await phase("resource explorer layout test body", async () => {
+        page = await owned!.browser.newPage("about:blank", {
+          waitUntil: "none",
+        });
+        collectPageErrors(page, pageErrors);
+        await page.setViewportSize({ width: 1280, height: 720 });
+        await page.goto(harness.url, { waitUntil: "load" });
+        await waitForLabels(page, (value) => value.length === 2, "the root");
+        await clickButton(page, "Expand main", "#resources .resource-row");
+        await waitForLabels(
+          page,
+          (value) => value.includes("public"),
+          "the catalog",
+        );
+        await clickButton(
+          page,
+          "Expand public",
+          "#resources .resource-row",
+          0,
+          "public",
+        );
+        await waitForLabels(
+          page,
+          (value) => value.includes("table_000"),
+          "the table page",
+        );
+        await clickButton(
+          page,
+          "Open",
+          "#resources .resource-row",
+          0,
+          "table_000",
+        );
+        await waitForSelector(page, '.tabulator-row [tabulator-field="c0"]');
+
+        const wide = await layout(page);
+        assert(wide.summaryHidden, "The sidebar has no summary.");
+        assert(wide.open);
+        assert(wide.panel.right <= wide.viewer.left, "Sidebar is at the left.");
+        assert(wide.panel.right - wide.panel.left < 400, "Sidebar is narrow.");
+        assert(
+          wide.panel.bottom - wide.panel.top <= wide.innerHeight,
+          "The sidebar fits the viewport.",
+        );
+        assert(wide.explorerScrolls, "Many rows scroll inside the sidebar.");
+        assertEquals(wide.documentWidth <= wide.innerWidth, true);
+        // More rows do not move the viewer.
+        await clickButton(page, "Load more", "#resources .resource-more");
+        await waitForLabels(
+          page,
+          (value) => value.includes("table_249"),
+          "the second page",
+        );
+        const after = await layout(page);
+        assertEquals(after.viewer, wide.viewer);
+        assertEquals(after.tables, wide.tables);
+        assert(
+          await scrollExplorerToEnd(page),
+          "The controls stay visible while the list is scrolled.",
+        );
+        if (shotDir) {
+          await scrollPageToTop(page);
+          await Deno.writeFile(
+            `${shotDir}/explorer-wide.png`,
+            await page.screenshot(),
+          );
+        }
+
+        await page.setViewportSize({ width: 700, height: 900 });
+        const narrow = await layout(page);
+        assert(!narrow.summaryHidden, "The panel has a summary.");
+        assert(narrow.open);
+        assert(narrow.panel.bottom <= narrow.tables.top, "Panel is above.");
+        assert(
+          narrow.explorer.bottom - narrow.explorer.top <= 900 * 0.4 + 1,
+          "The panel height is limited.",
+        );
+        assert(narrow.explorerScrolls);
+        assertEquals(narrow.documentWidth <= narrow.innerWidth, true);
+        assert(
+          await scrollExplorerToEnd(page),
+          "The panel controls stay visible while the list is scrolled.",
+        );
+        if (shotDir) {
+          await scrollPageToTop(page);
+          await Deno.writeFile(
+            `${shotDir}/explorer-narrow.png`,
+            await page.screenshot(),
+          );
+        }
+        // It folds on narrow screens and opens again when the window widens.
+        await click(page, "#resources-panel > summary");
+        await waitFor(
+          page,
+          () =>
+            (globalThis as unknown as {
+              document: {
+                querySelector(selector: string): { open: boolean } | null;
+              };
+            }).document.querySelector("#resources-panel")?.open === false,
+        );
+        await page.setViewportSize({ width: 1280, height: 720 });
+        await waitFor(
+          page,
+          () =>
+            (globalThis as unknown as {
+              document: {
+                querySelector(selector: string): { open: boolean } | null;
+              };
+            }).document.querySelector("#resources-panel")?.open === true,
+        );
       });
       assertEquals(pageErrors, []);
     } finally {

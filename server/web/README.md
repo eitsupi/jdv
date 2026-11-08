@@ -58,9 +58,18 @@ The Resource Tree explorer is implemented in `app.js` with its bookkeeping in
 `resource_tree.js`, which has no DOM dependency so unit tests can exercise it.
 It appears only for sessions whose `hello` declared
 `capabilities.resources: true` and renders one explorer per session in the
-`#resources` section, independently of the selected view. Each node keeps its
-expansion state, the children fetched so far, the next offset, and a
-browser-local fetch generation that discards responses made obsolete by a
-refresh or a collapse. The `hidden` field alone decides whether a node is hidden
-by default. Row text (label, class names, summary, unavailable reason) is built
-with the same helpers as the Object Tree and always set through `textContent`.
+`#resources` section, independently of the selected view. The section sits in
+`#resources-panel`, a `<details>` element: on windows at least 900px wide it is
+a sticky sidebar column (the summary is hidden and the panel is forced open)
+that scrolls on its own, and below that width it is a collapsible panel above
+the viewer with a limited height. The panel is hidden, and the layout returns to
+one column, while no session has an explorer. Each node record is keyed by its
+path (the ids from the root), so a node listed under two parents has two
+records. A record keeps the expansion state, the children fetched so far, the
+next offset, and a browser-local fetch generation that discards responses made
+obsolete by a refresh or a collapse. A refresh reads a node's pages again as a
+sweep and swaps the new listing in at the end; records are discarded only when a
+listing read to its last page no longer contains the node. The `hidden` field
+alone decides whether a node is hidden by default. Row text (label, class names,
+summary, unavailable reason) is built with the same helpers as the Object Tree
+and always set through `textContent`.

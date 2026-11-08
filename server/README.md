@@ -152,17 +152,23 @@ Snapshot.
 
 ### Resource Tree explorer
 
-A session whose `hello` declared `capabilities.resources: true` gets an explorer
-area under the session list. It is shown whether or not a view is selected, and
-a session without views still has one, including a session that was already
-connected when the page loaded. A session that did not declare the capability
-shows nothing extra. The explorer lists the root with `resources/children` when
-the session appears and fetches the children of a node only when the user
-expands it. Several nodes can stay expanded at once. `Load more` requests the
-next page at the announced `next_offset`, so a page that holds only hidden nodes
-still offers the next one. Entries with an id already listed under the same
-parent since the last fetch from offset 0 are dropped as duplicates; entries
-without an id are never treated as duplicates.
+A session whose `hello` declared `capabilities.resources: true` gets an
+explorer. On windows at least 900px wide the explorer is a sidebar: a
+fixed-width column on the left that scrolls on its own and fits the window
+height, so a long listing never moves the session list, the view list, or the
+viewer, which stay in the main column. On narrower windows it is a collapsible
+panel (open by default) above the viewer with a limited height and its own
+scrolling. When no session declared the capability there is no sidebar and the
+page keeps its single full-width column. The explorer is shown whether or not a
+view is selected, and a session without views still has one, including a session
+that was already connected when the page loaded. A session that did not declare
+the capability shows nothing extra. The explorer lists the root with
+`resources/children` when the session appears and fetches the children of a node
+only when the user expands it. Several nodes can stay expanded at once.
+`Load more` requests the next page at the announced `next_offset`, so a page
+that holds only hidden nodes still offers the next one. Entries with an id
+already listed under the same parent since the last fetch from offset 0 are
+dropped as duplicates; entries without an id are never treated as duplicates.
 
 Nodes with `hidden: true` are not shown until the `Show hidden` toggle is
 checked. Only that field decides; labels such as a leading `.` are not
@@ -177,11 +183,19 @@ shows that token and cannot be expanded or opened. `kind` selects a short
 symbol, and an unrecognized token is shown as `unknown`.
 
 `Refresh` fetches the root and every visible expanded node again from offset 0
-and keeps expansion and open views. Nodes under a collapsed parent are fetched
-again when they are next expanded. The browser tags each fetch with a local
-counter, unrelated to a view generation; a response from before a refresh or a
-collapse is discarded. When the session closes, the explorer and its requests
-are discarded.
+and keeps expansion and open views. A node that had several pages loaded is read
+again page by page until it covers what was loaded before and every expanded
+child has been found again (or the listing ends); the old listing stays on
+screen until then. Nodes under a collapsed parent are fetched again when they
+are next expanded. The browser tags each fetch with a local counter, unrelated
+to a view generation; a response from before a refresh or a collapse is
+discarded. When the session closes, the explorer and its requests are discarded.
+
+UI state (expansion, loaded pages, paging) is kept per path, the list of node
+ids from the root, so a node that the producer lists under two parents has
+independent state under each. The state of a node is discarded only when its
+parent's listing has been read to the end (`next_offset` null) and the node is
+not in it; reading only some pages never discards anything.
 
 ### Nested Arrow cells
 

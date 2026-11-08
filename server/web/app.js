@@ -21,12 +21,14 @@ import {
   beginOpen,
   canExpand,
   canOpen,
+  childPath,
   closeExplorer,
   collapse,
   createExplorer,
   createResourceViewTracker,
   declaresResources,
   endOpen,
+  existingChild,
   expand,
   failLoad,
   finishLoad,
@@ -35,6 +37,7 @@ import {
   isCurrent as isResourceFetchCurrent,
   nodeFor,
   nodeIdOf,
+  nodeKey,
   normalizeKind,
   refreshAll,
   RESOURCE_PAGE_SIZE,
@@ -54,6 +57,8 @@ const $ = (selector) => document.querySelector(selector);
 const status = $("#status");
 const sessionsElement = $("#sessions");
 const resourcesElement = $("#resources");
+const resourcesPanel = $("#resources-panel");
+const workspace = $("#workspace");
 const tablesElement = $("#tables");
 const viewer = $("#viewer");
 const treeViewer = $("#tree-viewer");
@@ -2641,6 +2646,7 @@ function ensureExplorer(session) {
   buildExplorerFrame(session, entry);
   explorers.set(session, entry);
   resourcesElement.append(element);
+  syncResourcesPanel();
   loadResources(session, entry.explorer.root, 0);
 }
 
@@ -2650,7 +2656,24 @@ function disposeExplorer(session) {
   closeExplorer(entry.explorer);
   entry.element.remove();
   explorers.delete(session);
+  syncResourcesPanel();
 }
+
+// The explorer lives in a sidebar next to the viewer on wide screens and in a
+// collapsible, height-limited panel above it on narrow ones. Without any
+// explorer the panel is hidden and the layout is a single column.
+function syncResourcesPanel() {
+  const present = explorers.size > 0;
+  resourcesPanel.hidden = !present;
+  workspace.classList.toggle("has-sidebar", present);
+}
+
+// The sidebar cannot be collapsed, so a panel that was folded while the window
+// was narrow opens again when the window becomes wide.
+const wideScreen = globalThis.matchMedia("(min-width: 56.25rem)");
+wideScreen.addEventListener("change", () => {
+  if (wideScreen.matches) resourcesPanel.open = true;
+});
 
 function cancelResourceRequests(ids) {
   for (const id of ids) {
@@ -2660,11 +2683,11 @@ function cancelResourceRequests(ids) {
   }
 }
 
-function loadResources(session, node, offset) {
+function loadResources(session, node, offset, options = {}) {
   const entry = explorers.get(session);
   if (!entry) return;
   const { explorer } = entry;
-  const token = startLoad(explorer, node, offset);
+  const token = startLoad(explorer, node, offset, options);
   if (!token) return;
   cancelResourceRequests([token.cancelId]);
   const promise = transport.request(
@@ -2677,9 +2700,17 @@ function loadResources(session, node, offset) {
   renderExplorer(session);
   promise.then((response) => {
     if (!isResourceFetchCurrent(explorer, node, token)) return;
-    const { cancelIds } = finishLoad(explorer, node, token, response?.result);
+    const { cancelIds, continueAt } = finishLoad(
+      explorer,
+      node,
+      token,
+      response?.result,
+    );
     cancelResourceRequests(cancelIds);
-    renderExplorer(session);
+    // A refresh reads a node's pages again until it has covered what was
+    // loaded before; the listing on screen is replaced only at the end.
+    if (continueAt !== null) loadResources(session, node, continueAt);
+    else renderExplorer(session);
   }).catch((error) => {
     if (error?.name === "AbortError") return;
     const message = error?.code
@@ -2689,10 +2720,10 @@ function loadResources(session, node, offset) {
   });
 }
 
-function toggleResourceNode(session, child) {
+function toggleResourceNode(session, parent, child) {
   const entry = explorers.get(session);
   if (!entry) return;
-  const node = nodeFor(entry.explorer, child.id, child);
+  const node = nodeFor(entry.explorer, childPath(parent, child.id), child);
   if (node.expanded) {
     cancelResourceRequests([collapse(node)]);
     renderExplorer(session);
@@ -2706,7 +2737,9 @@ function refreshResources(session) {
   if (!entry) return;
   const { targets, cancelIds } = refreshAll(entry.explorer);
   cancelResourceRequests(cancelIds);
-  for (const node of targets) loadResources(session, node, 0);
+  for (const node of targets) {
+    loadResources(session, node, 0, { refresh: true });
+  }
   renderExplorer(session);
 }
 
@@ -2791,7 +2824,12 @@ function buildExplorerFrame(session, entry) {
   status.setAttribute("aria-live", "polite");
   const body = document.createElement("div");
   body.className = "resource-body";
-  element.replaceChildren(heading, detail, controls, status, body);
+  // The header stays pinned at the top of the scrolling explorer area while
+  // the listing below it scrolls.
+  const header = document.createElement("div");
+  header.className = "resource-header";
+  header.append(heading, detail, controls, status);
+  element.replaceChildren(header, body);
   entry.statusElement = status;
   entry.bodyElement = body;
 }
@@ -2831,7 +2869,7 @@ function renderExplorer(session) {
 function renderResourceBody(session, explorer, node, ancestors) {
   const list = document.createElement("ul");
   list.className = "resource-children";
-  const nodeKey = nodeIdOf(node) ?? "";
+  const listKey = nodeKey(node);
   const children = visibleChildren(node, explorer.showHidden);
   for (const child of children) {
     const item = document.createElement("li");
@@ -2842,12 +2880,12 @@ function renderResourceBody(session, explorer, node, ancestors) {
     const identified = typeof child.id === "string" && child.id.length > 0;
     const expandable = canExpand(child);
     if (expandable) {
-      const open = explorer.nodes.get(child.id)?.expanded === true;
+      const open = existingChild(explorer, node, child.id)?.expanded === true;
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.className = "resource-toggle";
       toggle.dataset.action = "toggle-node";
-      toggle.dataset.focusKey = "toggle:" + child.id;
+      toggle.dataset.focusKey = "toggle:" + nodeKey(node) + child.id;
       toggle.setAttribute("aria-expanded", String(open));
       toggle.setAttribute(
         "aria-label",
@@ -2856,7 +2894,7 @@ function renderResourceBody(session, explorer, node, ancestors) {
       toggle.textContent = open ? "▾" : "▸";
       toggle.addEventListener(
         "click",
-        () => toggleResourceNode(session, child),
+        () => toggleResourceNode(session, node, child),
       );
       row.append(toggle);
     } else {
@@ -2889,7 +2927,7 @@ function renderResourceBody(session, explorer, node, ancestors) {
     }
     item.append(row);
     if (identified && !ancestors.includes(child.id)) {
-      const childNode = explorer.nodes.get(child.id);
+      const childNode = existingChild(explorer, node, child.id);
       if (expandable && childNode?.expanded) {
         item.append(
           renderResourceBody(session, explorer, childNode, [
@@ -2938,7 +2976,7 @@ function renderResourceBody(session, explorer, node, ancestors) {
     const more = document.createElement("button");
     more.type = "button";
     more.dataset.action = "load-more";
-    more.dataset.focusKey = "more:" + nodeKey;
+    more.dataset.focusKey = "more:" + listKey;
     more.textContent = "Load more";
     more.disabled = node.loading;
     more.addEventListener(
