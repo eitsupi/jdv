@@ -472,10 +472,9 @@ invalid. An omitted member or object means \code{false}. Unknown members are
 ignored. The members defined in v1 are \code{resources}, which declares the
 resource tree methods, and \code{resource_changes}, which declares change
 notifications for the resource tree and requires \code{resources} (see Resource
-trees). A host that does not use a
-feature ignores its member; declaring a feature does not by itself cause any
-request or notification. Capabilities are fixed for the session when \code{hello}
-is sent.
+trees). A host that does not use a feature ignores its member; declaring a
+feature does not by itself cause any request or notification. Capabilities
+are fixed for the session when \code{hello} is sent.
 
 \code{hello} is the first producer message on a new connection. A disconnect
 closes the views associated with that connection.
@@ -853,8 +852,8 @@ does not send its \code{view/open}.
 
 The opened view is a top-level view and has no parent view. It follows the
 usual view lifecycle and descriptor capabilities, including the producer's
-view limits. Listing or refreshing the resource tree does not affect any view,
-and closing a view does not change the resource tree. Opening a node
+view limits. Listing or refreshing the resource tree does not affect any
+view, and closing a view does not change the resource tree. Opening a node
 registers a view like any other, so when the producer is at its view limit it
 may close an existing view to make room, and \code{view/closed} is sent as usual.
 Every successful open creates a new view, even for a node that is already
@@ -883,9 +882,9 @@ only and never carry an Arrow IPC binary body.
 \subsection{Change notifications}{
 
 A producer that declares \code{capabilities.resource_changes: true} (together with
-\code{resources: true}) can tell a subscribed host that its resource tree may
-have changed. The capability only makes the methods below available;
-declaring it does not start any monitoring or send any notification.\tabular{llll}{
+\code{resources: true}) can tell a subscribed host that its resource tree may have
+changed. The capability only makes the methods below available; declaring it
+does not start any monitoring or send any notification.\tabular{llll}{
    Method \tab Direction \tab Kind \tab Result \cr
    \code{resources/subscribe} \tab Host to producer \tab Request \tab \verb{\{"enabled": <Boolean>\}}, the new state. \cr
    \code{resources/changed} \tab Producer to host \tab Notification \tab None. \cr
@@ -910,17 +909,17 @@ While subscribed, the producer sends
 
 when the listed resources may have changed. It is a hint that any listing the
 host holds may be out of date, not a description of a change: it names no
-node, several changes can be reported by one notification, and a
-notification may arrive when nothing visible changed. A host refreshes the
-parts of the tree it shows, as for a manual refresh, and lists hidden or
-collapsed parts again when they are next shown. A producer that detects a
-change within the scope its extension documents, while the session is
-subscribed and its notifications can be delivered, sends at least one
-notification after that change within a bounded delay. While an earlier
-\code{resources/changed} has not yet been delivered, the producer may drop a new
-one, because the earlier one already covers it. It sends no notification
-while unsubscribed. Unknown \code{params} members are ignored. Viewers keep a
-manual refresh, because a producer may not detect every change.
+node, several changes can be reported by one notification, and a notification
+may arrive when nothing visible changed. A host refreshes the parts of the
+tree it shows, as for a manual refresh, and lists hidden or collapsed parts
+again when they are next shown. A producer that detects a change within the
+scope its extension documents, while the session is subscribed and its
+notifications can be delivered, sends at least one notification after that
+change within a bounded delay. While an earlier \code{resources/changed} has not
+yet been delivered, the producer may drop a new one, because the earlier one
+already covers it. It sends no notification while unsubscribed. Unknown
+\code{params} members are ignored. Viewers keep a manual refresh, because a
+producer may not detect every change.
 }
 }
 
@@ -977,8 +976,8 @@ elements, calls \code{format()}, or calls a generic such as \code{length()}, \co
 size: \verb{data.frame [32 × 11]} (rows and columns), \verb{matrix double [3 × 4]},
 \code{double (100)}, \code{factor (150)}, \code{list (5)}, \code{function}, \code{environment} (no
 binding count), and the class name of an S4 object. A length is the stored
-length of the object, not the result of a user-defined \code{length()} method.
-The summary after a value is opened with \code{object/children} is unchanged.
+length of the object, not the result of a user-defined \code{length()} method. The
+summary after a value is opened with \code{object/children} is unchanged.
 
 A binding is read without evaluating it. Promises that have not been forced,
 active bindings, and missing arguments are listed with \code{viewable: false} and
@@ -1009,6 +1008,54 @@ oldest view when \code{jdv.max_tables} is reached.
 A children page that does not fit \code{jdv.max_message_bytes} is shortened to
 fewer children, with \code{next_offset} pointing at the first child left out. A
 single child that does not fit returns \code{limit_exceeded}.
+\subsection{Change notifications}{
+
+The R producer declares \code{capabilities.resource_changes: true} together with
+\code{resources: true}, so a session with the resource tree always offers
+\code{resources/subscribe}; \code{options(jdv.resources = FALSE)} removes both. A
+session with the resource tree turned off answers \code{resources/subscribe} with
+\code{unsupported}, and \code{\link[=jdv_handle_request]{jdv_handle_request()}} returns \code{method_not_found} for it.
+Declaring the capability starts no monitoring: a session is unsubscribed
+until the host subscribes, and the subscription, with everything kept for it,
+ends with the session (a disconnect, a notification queue overflow, or
+unloading the package). \code{enabled} must be a Boolean, otherwise the request is
+\code{invalid_request}; other members are ignored.
+
+While subscribed, R compares the listing with the one it saw last. It
+compares what the root shows for each binding: the name and id, \code{kind},
+\code{class}, \code{type}, \code{summary}, \code{hidden}, \code{unavailable}, and \code{viewable}. A
+binding that is added, removed, or listed differently, such as a new class,
+other dimensions, or a promise that was forced and can now be opened, makes R
+queue \code{resources/changed}. Before R 4.6.0 the comparison still sees names and
+whether a binding is an active binding. Because the listing does not show
+scalar values, a reassignment that is displayed the same, such as \code{x <- 1}
+followed by \code{x <- 2}, is not reported; a view opened from the variable is
+kept current by tracking, and opening always reads the current value. R keeps
+only this display metadata, not the values, and reads bindings the way the
+listing does: it does not evaluate a promise or an active binding and does
+not call an S3 or S4 method of a value.
+
+R looks after each top-level task has completed, and also at each call of
+\code{jdv_rpc(NULL)}, whether the task succeeded or not. A change inside a
+function, or in the middle of a long task such as \code{Sys.sleep()}, is seen only
+after the task ends. R does not look while a request or refresh is running or
+the transport is busy; the next look covers it. The cost is proportional to
+the number of bindings in the global environment: every task of a subscribed
+session lists all of them, whatever the page size, and there is no strict
+time limit.
+
+At most one \code{resources/changed} waits in the notification queue. While one
+has not been taken, by the transport that sends the queue or by
+\code{\link[=jdv_notifications]{jdv_notifications()}}, further changes queue nothing, and other notifications
+are never merged or dropped. After it is taken, the next change queues a new
+one. Hosts that use the tree still refresh manually, because a change that
+the listing does not show is not reported.
+
+The same task callback serves tracked views and the subscription, and each
+keeps its own state: it exists while a view is tracked or the session is
+subscribed. Closing the last tracked view keeps watching for a subscribed
+session, and unsubscribing keeps tracking views.
+}
 
  \code{object/children}:
 

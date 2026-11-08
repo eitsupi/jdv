@@ -171,6 +171,7 @@
   }
   .jdv_close_internal(notify = FALSE)
   .jdv_queue_reset()
+  .jdv_resources_release()
   .jdv_state$transport <- NULL
   .jdv_state$transport_limits <- NULL
   .jdv_state$transport_hello <- FALSE
@@ -445,6 +446,7 @@
 .jdv_hello <- function(limits = .jdv_state$transport_limits) {
   .jdv_state$session_counter <- .jdv_state$session_counter + 1L
   .jdv_state$resources <- .jdv_resources_option()
+  .jdv_resources_release()
   params <- list(
     protocol = 1L,
     session = paste0("r-", Sys.getpid(), "-", .jdv_state$session_counter),
@@ -456,7 +458,7 @@
     wake = TRUE
   )
   if (.jdv_state$resources) {
-    params$capabilities <- list(resources = TRUE)
+    params$capabilities <- list(resources = TRUE, resource_changes = TRUE)
   }
   params$limits <- limits
   list(method = "hello", params = params)
@@ -615,6 +617,7 @@ jdv_disconnect <- function() {
   # Release the registry now even if the native cleanup callback is deferred.
   .jdv_close_internal(notify = FALSE)
   .jdv_queue_reset()
+  .jdv_resources_release()
   if (isTRUE(.jdv_state$embedded) && is.null(.jdv_state$transport)) {
     .jdv_state$embedded <- FALSE
     .jdv_state$last_disconnect_reason <- "disconnect"

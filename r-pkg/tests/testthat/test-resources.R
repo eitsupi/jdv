@@ -362,7 +362,10 @@ test_that("a session without views serves the resource tree", {
   on.exit(jdv_disconnect(), add = TRUE)
   first <- jdv_register(mtcars)
   hello <- .jdv_json_parse(jdv_notifications()[[1L]])$params
-  expect_identical(unclass(hello$capabilities), list(resources = TRUE))
+  expect_identical(
+    unclass(hello$capabilities),
+    list(resources = TRUE, resource_changes = TRUE)
+  )
   jdv_close(first$id)
   jdv_notifications()
   expect_identical(jdv_connection()$owner, "embedded")
@@ -876,7 +879,10 @@ test_that("jdv.resources = FALSE disables the resource tree for the session", {
   jdv_disconnect()
   jdv_register(mtcars)
   hello <- .jdv_json_parse(jdv_notifications()[[1L]])$params
-  expect_identical(unclass(hello$capabilities), list(resources = TRUE))
+  expect_identical(
+    unclass(hello$capabilities),
+    list(resources = TRUE, resource_changes = TRUE)
+  )
   expect_null(res_children(limit = 1)$error)
 })
 
@@ -1007,7 +1013,10 @@ test_that("a viewer connection serves resources before any view", {
     messages <- run_host(TRUE, late)
     methods <- vapply(messages, function(m) m$method %||% "response", "")
     expect_identical(messages[[1L]]$method, "hello")
-    expect_identical(messages[[1L]]$params$capabilities, list(resources = TRUE))
+    expect_identical(
+      messages[[1L]]$params$capabilities,
+      list(resources = TRUE, resource_changes = TRUE)
+    )
     ids <- vapply(messages, function(m) m$id %||% "", "")
     responses <- messages[ids %in% c("list", "open", "again")]
     expect_null(responses[[1L]]$error)

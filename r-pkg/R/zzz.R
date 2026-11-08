@@ -17,6 +17,7 @@
   .Call(C_jdv_arrow_cleanup)
   .jdv_transport_remove_task_callback()
   .jdv_track_remove_callback()
+  .jdv_resources_release()
   .jdv_close_internal(notify = FALSE)
   .jdv_queue_reset()
   .jdv_state$embedded <- FALSE

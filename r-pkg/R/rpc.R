@@ -27,6 +27,10 @@
   state$transport_task_callback <- NULL
   state$track_task_callback <- NULL
   state$tracking <- FALSE
+  state$res_subscribed <- FALSE
+  state$res_baseline <- NULL
+  state$res_pending <- FALSE
+  state$res_polling <- FALSE
   state$unloading <- FALSE
   state
 })
@@ -182,6 +186,8 @@ jdv_abort <- function(code, message) stop(jdv_condition(code, message))
 .jdv_queue_reset <- function(limits = NULL) {
   .jdv_state$queue <- list()
   .jdv_state$queue_bytes <- 0
+  # Whatever was queued is gone, so a resources/changed is no longer pending.
+  .jdv_state$res_pending <- FALSE
   if (!is.null(limits)) {
     .jdv_state$queue_max_messages <- limits$messages
     .jdv_state$queue_max_bytes <- limits$bytes
@@ -231,6 +237,7 @@ jdv_abort <- function(code, message) stop(jdv_condition(code, message))
 .jdv_session_overflow <- function() {
   .jdv_queue_reset()
   .jdv_close_internal(notify = FALSE)
+  .jdv_resources_release()
   if (identical(.jdv_session_owner(), "transport")) {
     # The disconnect callback records the reason once cleanup runs.
     .jdv_transport_close("notification_overflow")
@@ -280,6 +287,7 @@ jdv_abort <- function(code, message) stop(jdv_condition(code, message))
     error = function(error) {
       .jdv_state$embedded <- FALSE
       .jdv_queue_reset()
+      .jdv_resources_release()
       stop(error)
     }
   )
@@ -295,6 +303,7 @@ jdv_abort <- function(code, message) stop(jdv_condition(code, message))
   ) {
     .jdv_state$embedded <- FALSE
     .jdv_queue_reset()
+    .jdv_resources_release()
   }
   invisible(NULL)
 }
@@ -1892,9 +1901,10 @@ jdv_rpc <- function(request = NULL) {
       .Call(C_jdv_transport_poll)
       .jdv_assert_active()
     }
-    # Tracked bindings are checked here too, so an embedding host that runs
-    # its own task callback can take the updates right after this call.
-    .jdv_track_poll()
+    # Tracked bindings and the resource tree are checked here too, so an
+    # embedding host that runs its own task callback can take the updates right
+    # after this call.
+    .jdv_watch_signal(.jdv_watch_poll())
     .jdv_assert_active()
     return(invisible(NULL))
   }

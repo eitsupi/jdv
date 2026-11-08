@@ -9,7 +9,11 @@
 
 .jdv_resource_id_limit <- 16384L
 .jdv_resource_page_limit <- 500L
-.jdv_resource_methods <- c("resources/children", "resources/open")
+.jdv_resource_methods <- c(
+  "resources/children",
+  "resources/open",
+  "resources/subscribe"
+)
 
 # The resource tree is a session feature fixed when hello is created (see
 # .jdv_hello()). It answers only while a session exists.
@@ -443,7 +447,127 @@
   }
   if (identical(method, "resources/children")) {
     .jdv_resources_children(params)
+  } else if (identical(method, "resources/subscribe")) {
+    .jdv_resources_subscribe(params)
   } else {
     .jdv_resources_open(params)
   }
+}
+
+# Change notifications. A session that subscribed compares the listing after
+# each top-level task with the one it saw last, and tells the host once when it
+# differs. The comparison uses exactly what the listing shows for a binding
+# (.jdv_resource_child()), so it reads bindings without evaluating them and
+# calls no S3 or S4 method, and it holds no value, only display metadata.
+
+.jdv_resource_changed_message <- '{"method":"resources/changed","params":{}}'
+
+# The display metadata of every binding of the global environment, in a fixed
+# order that does not depend on the locale or on the order ls() returns. The
+# page order of the listing is not needed here, only a repeatable one.
+.jdv_resources_scan <- function() {
+  names <- base::ls(envir = globalenv(), all.names = TRUE, sorted = FALSE)
+  if (length(names) > 1L) {
+    names <- tryCatch(
+      names[order(names, method = "radix")],
+      error = function(error) names
+    )
+  }
+  lapply(names, .jdv_resource_child)
+}
+
+# Forget the subscription of the ended session, and stop the task callback when
+# nothing tracks a view either. Safe to call at any time.
+.jdv_resources_release <- function() {
+  was_subscribed <- isTRUE(.jdv_state$res_subscribed)
+  .jdv_state$res_subscribed <- FALSE
+  .jdv_state$res_baseline <- NULL
+  .jdv_state$res_pending <- FALSE
+  if (was_subscribed && !.jdv_track_active()) {
+    .jdv_track_remove_callback()
+  }
+  invisible(NULL)
+}
+
+# resources/subscribe: set whether the session is told about changes.
+.jdv_resources_subscribe <- function(params) {
+  params <- .jdv_resources_params(params, "enabled", "enabled")
+  enabled <- params$enabled
+  if (
+    !is.logical(enabled) ||
+      is.object(enabled) ||
+      length(enabled) != 1L ||
+      is.na(enabled)
+  ) {
+    query_error("invalid_request", "enabled must be true or false.")
+  }
+  if (!enabled) {
+    .jdv_resources_release()
+  } else if (!isTRUE(.jdv_state$res_subscribed)) {
+    # The baseline exists before the response, so a change after it is seen.
+    baseline <- .jdv_resources_scan()
+    .jdv_state$res_baseline <- baseline
+    .jdv_state$res_pending <- FALSE
+    .jdv_state$res_subscribed <- TRUE
+    .jdv_track_install_callback()
+  }
+  list(enabled = isTRUE(.jdv_state$res_subscribed))
+}
+
+# Queue resources/changed unless one is already waiting to be delivered. The
+# flag is cleared whenever the queue is taken or discarded.
+.jdv_resources_notify_changed <- function() {
+  if (isTRUE(.jdv_state$res_pending)) {
+    return(invisible(FALSE))
+  }
+  .jdv_notify(.jdv_resource_changed_message)
+  .jdv_state$res_pending <- TRUE
+  invisible(TRUE)
+}
+
+# Compare the listing with the last one seen and queue a notification when it
+# differs. Returns without work under the gates of .jdv_track_poll(): while a
+# request, a refresh, or another poll runs, or while the transport is busy; the
+# next poll covers it. The outcome of the task (`ok`, `visible`) is not a
+# condition, because a failed task can change the global environment too.
+.jdv_resources_poll <- function() {
+  if (!isTRUE(.jdv_state$res_subscribed)) {
+    return(invisible(FALSE))
+  }
+  if (identical(.jdv_session_owner(), "none")) {
+    .jdv_resources_release()
+    return(invisible(FALSE))
+  }
+  if (
+    isTRUE(.jdv_state$unloading) ||
+      isTRUE(.jdv_state$refreshing) ||
+      isTRUE(.jdv_state$tracking) ||
+      isTRUE(.jdv_state$res_polling) ||
+      .jdv_state$rpc_depth > 0L
+  ) {
+    return(invisible(FALSE))
+  }
+  status <- .jdv_transport_status()
+  if (!is.null(status) && isTRUE(status$busy)) {
+    return(invisible(FALSE))
+  }
+  .jdv_state$res_polling <- TRUE
+  on.exit(.jdv_state$res_polling <- FALSE, add = TRUE)
+  current <- .jdv_resources_scan()
+  .jdv_assert_active()
+  if (
+    !isTRUE(.jdv_state$res_subscribed) ||
+      identical(.jdv_session_owner(), "none") ||
+      identical(current, .jdv_state$res_baseline)
+  ) {
+    return(invisible(TRUE))
+  }
+  .jdv_state$res_baseline <- current
+  .jdv_resources_notify_changed()
+  if (
+    identical(.jdv_session_owner(), "transport") && .jdv_state$rpc_depth == 0L
+  ) {
+    .jdv_transport_flush()
+  }
+  invisible(TRUE)
 }

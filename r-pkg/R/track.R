@@ -381,8 +381,9 @@ jdv_binding <- function(name, env = parent.frame()) {
 
 .jdv_track_active <- function() length(.jdv_track_entries()) > 0L
 
-# The task callback exists only while a tracked view does. It is independent of
-# the viewer transport, which has its own cleanup callback.
+# The task callback exists only while a tracked view does or the session is
+# subscribed to resource changes. It is independent of the viewer transport,
+# which has its own cleanup callback.
 .jdv_track_remove_callback <- function(name = .jdv_state$track_task_callback) {
   if (is.null(name)) {
     return(invisible(NULL))
@@ -394,27 +395,62 @@ jdv_binding <- function(name, env = parent.frame()) {
   invisible(NULL)
 }
 
+# One poll for everything the task callback watches: tracked views first, then
+# the resource tree. The two have separate state and separate error
+# boundaries, so a failure of one never stops the other. Returns a list of the
+# errors, `track` and `resources`, each NULL when that part succeeded.
+.jdv_watch_poll <- function() {
+  errors <- list(track = NULL, resources = NULL)
+  tryCatch(.jdv_track_poll(), error = function(error) errors$track <<- error)
+  # An overflow ended the session, and an unload ends everything.
+  ended <- inherits(errors$track, "jdv_notification_overflow") ||
+    isTRUE(.jdv_state$unloading)
+  if (!ended) {
+    tryCatch(
+      .jdv_resources_poll(),
+      error = function(error) errors$resources <<- error
+    )
+  }
+  errors
+}
+
+# Raise the first error of .jdv_watch_poll(), for callers that do not recover.
+.jdv_watch_signal <- function(errors) {
+  for (error in errors) {
+    if (!is.null(error)) {
+      stop(error)
+    }
+  }
+  invisible(NULL)
+}
+
 .jdv_track_task_callback <- function(expr, value, ok, visible) {
   if (isTRUE(.jdv_state$unloading)) {
     return(FALSE)
   }
-  if (!.jdv_track_active()) {
+  if (!.jdv_track_active() && !isTRUE(.jdv_state$res_subscribed)) {
     .jdv_track_remove_callback()
     return(FALSE)
   }
-  tryCatch(
-    .jdv_track_poll(),
-    jdv_notification_overflow = function(error) {
-      warning(conditionMessage(error), call. = FALSE)
-    },
-    error = function(error) {
-      warning(
-        "Updating tracked jdv views failed: ",
-        conditionMessage(error),
-        call. = FALSE
-      )
-    }
-  )
+  errors <- .jdv_watch_poll()
+  if (inherits(errors$track, "jdv_notification_overflow")) {
+    warning(conditionMessage(errors$track), call. = FALSE)
+  } else if (!is.null(errors$track)) {
+    warning(
+      "Updating tracked jdv views failed: ",
+      conditionMessage(errors$track),
+      call. = FALSE
+    )
+  }
+  if (inherits(errors$resources, "jdv_notification_overflow")) {
+    warning(conditionMessage(errors$resources), call. = FALSE)
+  } else if (!is.null(errors$resources)) {
+    warning(
+      "Watching the jdv resource tree failed: ",
+      conditionMessage(errors$resources),
+      call. = FALSE
+    )
+  }
   TRUE
 }
 

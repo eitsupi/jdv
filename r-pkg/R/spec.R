@@ -1042,6 +1042,54 @@
 #' fewer children, with `next_offset` pointing at the first child left out. A
 #' single child that does not fit returns `limit_exceeded`.
 #'
+#' ## Change notifications
+#'
+#' The R producer declares `capabilities.resource_changes: true` together with
+#' `resources: true`, so a session with the resource tree always offers
+#' `resources/subscribe`; `options(jdv.resources = FALSE)` removes both. A
+#' session with the resource tree turned off answers `resources/subscribe` with
+#' `unsupported`, and [jdv_handle_request()] returns `method_not_found` for it.
+#' Declaring the capability starts no monitoring: a session is unsubscribed
+#' until the host subscribes, and the subscription, with everything kept for it,
+#' ends with the session (a disconnect, a notification queue overflow, or
+#' unloading the package). `enabled` must be a Boolean, otherwise the request is
+#' `invalid_request`; other members are ignored.
+#'
+#' While subscribed, R compares the listing with the one it saw last. It
+#' compares what the root shows for each binding: the name and id, `kind`,
+#' `class`, `type`, `summary`, `hidden`, `unavailable`, and `viewable`. A
+#' binding that is added, removed, or listed differently, such as a new class,
+#' other dimensions, or a promise that was forced and can now be opened, makes R
+#' queue `resources/changed`. Before R 4.6.0 the comparison still sees names and
+#' whether a binding is an active binding. Because the listing does not show
+#' scalar values, a reassignment that is displayed the same, such as `x <- 1`
+#' followed by `x <- 2`, is not reported; a view opened from the variable is
+#' kept current by tracking, and opening always reads the current value. R keeps
+#' only this display metadata, not the values, and reads bindings the way the
+#' listing does: it does not evaluate a promise or an active binding and does
+#' not call an S3 or S4 method of a value.
+#'
+#' R looks after each top-level task has completed, and also at each call of
+#' `jdv_rpc(NULL)`, whether the task succeeded or not. A change inside a
+#' function, or in the middle of a long task such as `Sys.sleep()`, is seen only
+#' after the task ends. R does not look while a request or refresh is running or
+#' the transport is busy; the next look covers it. The cost is proportional to
+#' the number of bindings in the global environment: every task of a subscribed
+#' session lists all of them, whatever the page size, and there is no strict
+#' time limit.
+#'
+#' At most one `resources/changed` waits in the notification queue. While one
+#' has not been taken, by the transport that sends the queue or by
+#' [jdv_notifications()], further changes queue nothing, and other notifications
+#' are never merged or dropped. After it is taken, the next change queues a new
+#' one. Hosts that use the tree still refresh manually, because a change that
+#' the listing does not show is not reported.
+#'
+#' The same task callback serves tracked views and the subscription, and each
+#' keeps its own state: it exists while a view is tracked or the session is
+#' subscribed. Closing the last tracked view keeps watching for a subscribed
+#' session, and unsubscribing keeps tracking views.
+#'
 #'
 #' @section R producer extension: `object/children`:
 #'
