@@ -135,6 +135,19 @@ controls. The UI always sends the original R row index after sorting, filtering,
 or paging. The view breadcrumb restores the parent's query, page, and horizontal
 scroll, or its object path and child-page offset.
 
+The Resource Tree explorer of a session that declares
+`capabilities.resource_changes` updates itself. The browser sends
+`resources/subscribe` before the first listing, so a change between the listing
+and the subscription cannot be missed; if the subscription fails, the explorer
+notes that automatic updates are unavailable and keeps working with the manual
+Refresh. A `resources/changed` notice only marks the explorer as changed. A
+refresh that is running is never cancelled by notices, and when it ends with a
+change still pending, one more refresh follows. A refresh reads the loaded page
+ranges and the expanded children again, keeps the expansion state, scroll
+position, and hidden setting, and is not retried when it fails. Collapsed nodes
+are fetched when they are next expanded, and a folded explorer panel is
+refreshed when it is opened.
+
 A child open waiting for R is shown separately from page loading. Snapshot sort,
 filter, and page changes keep working without canceling that original cell
 request. Its child opens automatically when R handles it at the prompt, provided

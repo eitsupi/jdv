@@ -79,6 +79,8 @@ export function createExplorer() {
     nodes: new Map(),
     opening: new Set(),
     closed: false,
+    // The producer announced a change that no fetch started since has covered.
+    dirty: false,
   };
 }
 
@@ -314,6 +316,9 @@ export function failLoad(explorer, node, token, message) {
   node.requestId = null;
   node.error = message;
   node.failedOffset = token.offset;
+  // A failed fetch is never retried on its own: the next change notice or a
+  // manual Refresh asks again.
+  explorer.dirty = false;
   return true;
 }
 
@@ -368,6 +373,9 @@ export function collapse(node) {
  * retired.
  */
 export function refreshAll(explorer) {
+  // The change notices received so far are covered by the fetches this starts;
+  // one that arrives while they run sets the flag again.
+  explorer.dirty = false;
   const targets = [];
   const reached = new Set();
   const walk = (node) => {
@@ -391,6 +399,34 @@ export function refreshAll(explorer) {
     if (node.loaded) node.stale = true;
   }
   return { targets, cancelIds };
+}
+
+/** Whether any record has a fetch in flight. */
+export function isFetching(explorer) {
+  if (explorer.root.loading) return true;
+  for (const node of explorer.nodes.values()) if (node.loading) return true;
+  return false;
+}
+
+/**
+ * Records that the producer announced a change (`resources/changed`). It only
+ * raises a flag: nothing in flight is cancelled, so a run of notices cannot
+ * keep a refresh from finishing.
+ */
+export function markChanged(explorer) {
+  if (!explorer.closed) explorer.dirty = true;
+}
+
+/**
+ * Whether an automatic refresh should start now: a change is pending and no
+ * fetch is in flight. The caller checks this when a fetch completes and when a
+ * hidden explorer becomes visible, and starts the refresh with `refreshAll`,
+ * which clears the flag. While a refresh runs the flag stays up, which makes
+ * the refresh that follows it (the trailing refresh) start from the check made
+ * when its last fetch completes.
+ */
+export function refreshDue(explorer) {
+  return explorer.dirty && !explorer.closed && !isFetching(explorer);
 }
 
 /** Marks an Open as sent; false when one is already in flight for the node. */

@@ -335,6 +335,13 @@ Deno.test({
         assert(current.includes("newest_root"));
         producer.onResource = undefined;
 
+        // Without the resource_changes capability nothing is subscribed.
+        assert(
+          !producer.resourceRequests.some((request) =>
+            request.method === "resources/subscribe"
+          ),
+        );
+
         // The explorer ends with its session.
         producer.close();
         await waitFor(
@@ -387,6 +394,7 @@ Deno.test({
         );
         assertEquals(await count(page, "#resources .resource-explorer"), 0);
         assertEquals(harness.producer.resourceRequests.length, 0);
+        assertEquals(harness.producer.subscribeRequests, []);
       });
       assertEquals(pageErrors, []);
     } finally {
@@ -623,6 +631,222 @@ Deno.test({
       });
       assertEquals(pageErrors, []);
     } finally {
+      await finishIntegrationCleanup([
+        () => page?.close(),
+        () => owned?.close(),
+        () => harness.close(),
+      ]);
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "Resource Tree explorer subscribes first and refreshes itself on changes",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const harness = await NonRProducerHarness.start({
+      capabilities: { resources: true, resource_changes: true },
+    });
+    let owned: Awaited<ReturnType<typeof launch>> | undefined;
+    let page: Page | undefined;
+    let second: Page | undefined;
+    const pageErrors: string[] = [];
+    const producer = harness.producer;
+    try {
+      owned = await launch();
+      await phase("resource changes test body", async () => {
+        page = await owned!.browser.newPage("about:blank", {
+          waitUntil: "none",
+        });
+        collectPageErrors(page, pageErrors);
+        await page.goto(harness.url, { waitUntil: "load" });
+        await waitForLabels(
+          page,
+          (value) => value.length === 2,
+          "the root listing",
+        );
+        // The subscription reaches the producer before the first listing.
+        assertEquals(producer.subscribeRequests, [true]);
+        const methods = producer.resourceRequests.map((request) =>
+          request.method
+        );
+        assertEquals(methods[0], "resources/subscribe");
+        assertEquals(methods[1], "resources/children");
+
+        await clickButton(
+          page,
+          "Expand main",
+          "#resources .resource-row",
+          0,
+          "main",
+        );
+        await waitForLabels(
+          page,
+          (value) => value.includes("public"),
+          "the main catalog children",
+        );
+
+        // A change notice refreshes the listing and keeps the expansion.
+        producer.addRootTable("auto_one");
+        assert(producer.signalResourcesChanged());
+        let current = await waitForLabels(
+          page,
+          (value) => value.includes("auto_one"),
+          "the automatically refreshed root listing",
+        );
+        assert(current.includes("public"), "The expansion state is kept.");
+        assertEquals(await count(page, '[aria-expanded="true"]'), 1);
+
+        // A notice during a fetch lets that fetch finish and then refreshes
+        // once more, so the last change is shown.
+        const held: { id: string }[] = [];
+        producer.onResource = (request) => {
+          if (
+            request.method === "resources/children" &&
+            request.params.node === null && held.length === 0
+          ) {
+            held.push({ id: request.id });
+            return true;
+          }
+          return false;
+        };
+        producer.addRootTable("auto_three");
+        assert(producer.signalResourcesChanged());
+        const started = Date.now();
+        while (held.length === 0 && Date.now() - started < 5_000) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        assertEquals(held.length, 1);
+        // Changed again while the first refresh is still running.
+        producer.addRootTable("auto_four");
+        assert(producer.signalResourcesChanged());
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        const rootRequests = () =>
+          producer.resourceRequests.filter((request) =>
+            request.method === "resources/children" &&
+            request.params.node === null
+          ).length;
+        const before = rootRequests();
+        // The answer reflects the list from before the second change.
+        await producer.respond(held[0].id, {
+          node: null,
+          offset: 0,
+          children: [{
+            id: "t:auto_three",
+            label: "auto_three",
+            kind: "table",
+            has_children: false,
+            viewable: true,
+          }],
+          total_children: 1,
+          next_offset: null,
+        });
+        current = await waitForLabels(
+          page,
+          (value) => value.includes("auto_four"),
+          "the trailing refresh",
+        );
+        assertEquals(rootRequests(), before + 1);
+        assert(current.includes("auto_three"));
+        producer.onResource = undefined;
+
+        // A second tab lists the tree and is updated by the same producer
+        // subscription.
+        second = await owned!.browser.newPage("about:blank", {
+          waitUntil: "none",
+        });
+        collectPageErrors(second, pageErrors);
+        await second.goto(harness.url, { waitUntil: "load" });
+        await waitForLabels(
+          second,
+          (value) => value.includes("auto_four"),
+          "the second tab's listing",
+        );
+        producer.addRootTable("auto_five");
+        assert(producer.signalResourcesChanged());
+        await waitForLabels(
+          page,
+          (value) => value.includes("auto_five"),
+          "the first tab's update",
+        );
+        await waitForLabels(
+          second,
+          (value) => value.includes("auto_five"),
+          "the second tab's update",
+        );
+        assertEquals(producer.subscribeRequests, [true]);
+      });
+      assertEquals(pageErrors, []);
+    } finally {
+      producer.onResource = undefined;
+      await finishIntegrationCleanup([
+        () => second?.close(),
+        () => page?.close(),
+        () => owned?.close(),
+        () => harness.close(),
+      ]);
+    }
+  },
+});
+
+Deno.test({
+  name: "Resource Tree explorer keeps working when the subscription is refused",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const harness = await NonRProducerHarness.start({
+      capabilities: { resources: true, resource_changes: true },
+    });
+    let owned: Awaited<ReturnType<typeof launch>> | undefined;
+    let page: Page | undefined;
+    const pageErrors: string[] = [];
+    const producer = harness.producer;
+    try {
+      producer.onResource = async (request) => {
+        if (request.method !== "resources/subscribe") return false;
+        await producer.respond(request.id, undefined, {
+          code: "internal_error",
+          message: "no subscriptions today",
+        });
+        return true;
+      };
+      owned = await launch();
+      await phase("refused subscription test body", async () => {
+        page = await owned!.browser.newPage("about:blank", {
+          waitUntil: "none",
+        });
+        collectPageErrors(page, pageErrors);
+        await page.goto(harness.url, { waitUntil: "load" });
+        await waitForLabels(
+          page,
+          (value) => value.length === 2,
+          "the root listing",
+        );
+        assert(
+          (await texts(page, "#resources .resource-explorer p.muted"))
+            .some((value) => value.includes("Automatic updates")),
+          "The refused subscription is noted.",
+        );
+        // The manual Refresh still works, and the subscription is not retried.
+        producer.addRootTable("manual_only");
+        await clickButton(page, "Refresh", "#resources .resource-explorer");
+        await waitForLabels(
+          page,
+          (value) => value.includes("manual_only"),
+          "the manually refreshed listing",
+        );
+        assertEquals(
+          producer.resourceRequests.filter((request) =>
+            request.method === "resources/subscribe"
+          ).length,
+          1,
+        );
+      });
+      assertEquals(pageErrors, []);
+    } finally {
+      producer.onResource = undefined;
       await finishIntegrationCleanup([
         () => page?.close(),
         () => owned?.close(),

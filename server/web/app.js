@@ -35,11 +35,13 @@ import {
   hasMore,
   hiddenCount,
   isCurrent as isResourceFetchCurrent,
+  markChanged,
   nodeFor,
   nodeIdOf,
   nodeKey,
   normalizeKind,
   refreshAll,
+  refreshDue,
   RESOURCE_PAGE_SIZE,
   rowLabel,
   rowSummaryText,
@@ -257,6 +259,8 @@ socket.addEventListener("message", (event) => {
       }
     } else if (method === "view/tracking") {
       applyTracking(message.session, message.message.params);
+    } else if (method === "resources/changed") {
+      resourcesChanged(message.session);
     } else if (method) setStatus(`Producer notification: ${method}`, "info");
   }
 });
@@ -2629,7 +2633,9 @@ const KIND_GLYPHS = {
 };
 
 // Creates the explorer of a session that declared resources and fetches its
-// root listing. Sessions without the capability get nothing.
+// root listing. Sessions without the capability get nothing. A session that
+// also declared `resource_changes` is subscribed first, so that no change
+// between the first listing and the subscription can be missed.
 function ensureExplorer(session) {
   const info = knownSessions.get(session);
   if (!info || !declaresResources(info) || explorers.has(session)) return;
@@ -2641,14 +2647,61 @@ function ensureExplorer(session) {
     element,
     status: null,
     statusElement: null,
+    detailElement: null,
     bodyElement: null,
   };
   buildExplorerFrame(session, entry);
   explorers.set(session, entry);
   resourcesElement.append(element);
   syncResourcesPanel();
+  if (info.capabilities?.resource_changes === true) {
+    void subscribeThenLoad(session, entry);
+  } else loadResources(session, entry.explorer.root, 0);
+}
+
+async function subscribeThenLoad(session, entry) {
+  try {
+    await transport.request(
+      session,
+      "resources/subscribe",
+      { enabled: true },
+      60_000,
+    );
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    // The listing and the manual Refresh still work; the subscription is not
+    // tried again.
+    if (explorers.get(session) === entry) {
+      entry.detailElement.textContent =
+        `${session} · Automatic updates are unavailable`;
+    }
+  }
+  if (explorers.get(session) !== entry) return;
   loadResources(session, entry.explorer.root, 0);
 }
+
+// A change notice only raises a flag; `refreshWhenDue` decides when to fetch.
+function resourcesChanged(session) {
+  const entry = explorers.get(session);
+  if (!entry) return;
+  markChanged(entry.explorer);
+  refreshWhenDue(session);
+}
+
+// Starts the refresh that a pending change notice asks for. It waits while a
+// fetch is in flight (the caller checks again when that fetch completes) and
+// while the explorer is out of sight (the panel is folded on a narrow screen).
+function refreshWhenDue(session) {
+  const entry = explorers.get(session);
+  if (!entry || !refreshDue(entry.explorer)) return;
+  if (!wideScreen.matches && !resourcesPanel.open) return;
+  refreshResources(session);
+}
+
+resourcesPanel.addEventListener("toggle", () => {
+  if (!resourcesPanel.open) return;
+  for (const session of [...explorers.keys()]) refreshWhenDue(session);
+});
 
 function disposeExplorer(session) {
   const entry = explorers.get(session);
@@ -2710,7 +2763,10 @@ function loadResources(session, node, offset, options = {}) {
     // A refresh reads a node's pages again until it has covered what was
     // loaded before; the listing on screen is replaced only at the end.
     if (continueAt !== null) loadResources(session, node, continueAt);
-    else renderExplorer(session);
+    else {
+      renderExplorer(session);
+      refreshWhenDue(session);
+    }
   }).catch((error) => {
     if (error?.name === "AbortError") return;
     const message = error?.code
@@ -2727,6 +2783,7 @@ function toggleResourceNode(session, parent, child) {
   if (node.expanded) {
     cancelResourceRequests([collapse(node)]);
     renderExplorer(session);
+    refreshWhenDue(session);
   } else if (expand(entry.explorer, node)) {
     loadResources(session, node, 0);
   } else renderExplorer(session);
@@ -2799,6 +2856,7 @@ function buildExplorerFrame(session, entry) {
   const detail = document.createElement("p");
   detail.className = "muted";
   detail.textContent = session;
+  entry.detailElement = detail;
   const controls = document.createElement("div");
   controls.className = "resource-controls";
   const refresh = document.createElement("button");

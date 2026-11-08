@@ -3,6 +3,7 @@ import {
   beginOpen,
   canExpand,
   canOpen,
+  closeExplorer,
   collapse,
   createExplorer as createTypedExplorer,
   createResourceViewTracker,
@@ -13,10 +14,13 @@ import {
   finishLoad,
   hasMore,
   hiddenCount,
+  isFetching,
+  markChanged,
   nodeFor as typedNodeFor,
   nodeIdOf,
   normalizeKind,
   refreshAll,
+  refreshDue,
   rowLabel,
   rowSummaryText,
   startLoad,
@@ -570,4 +574,140 @@ Deno.test("retrying an ordinary failed load is not a sweep", () => {
   const reload = startLoad(loaded, p, 0)!;
   assert(failLoad(loaded, p, reload, "boom"));
   assertEquals(startLoad(loaded, p, p.failedOffset)!.sweep, false);
+});
+
+// Starts the sweeps a refresh asks for and returns their tokens.
+function startRefresh(explorer: Any) {
+  const { targets } = refreshAll(explorer);
+  return targets.map((node: Any) => ({
+    node,
+    token: startLoad(explorer, node, 0, { refresh: true }),
+  }));
+}
+
+Deno.test("a change notice before the first fetch is covered by a trailing refresh", () => {
+  const explorer = createExplorer();
+  const token = startLoad(explorer, explorer.root, 0);
+  assert(isFetching(explorer));
+  markChanged(explorer);
+  assert(!refreshDue(explorer), "A fetch in flight defers the refresh.");
+  finishLoad(explorer, explorer.root, token, page(0, [entry("a")]));
+  assert(!isFetching(explorer));
+  assert(refreshDue(explorer));
+  const [started] = startRefresh(explorer);
+  assert(started.token);
+  assert(!explorer.dirty, "Starting the refresh clears the flag.");
+  assert(!refreshDue(explorer));
+});
+
+Deno.test("a notice during a multi-page sweep lets it finish and then refreshes once more", () => {
+  const explorer = createExplorer();
+  load(explorer, explorer.root, 0, page(0, [entry("a"), entry("b")], 2, 4));
+  load(explorer, explorer.root, 2, page(2, [entry("c"), entry("d")], null, 4));
+  assertEquals(explorer.root.loadedEnd, 4);
+  const [first] = startRefresh(explorer);
+  const generation = explorer.root.generation;
+  const result = finishLoad(
+    explorer,
+    explorer.root,
+    first.token,
+    page(0, [entry("a"), entry("b")], 2, 4),
+  );
+  assertEquals(result.continueAt, 2);
+  // Notices keep arriving; none of them cancels or restarts the sweep.
+  markChanged(explorer);
+  markChanged(explorer);
+  assertEquals(explorer.root.generation, generation);
+  const second = startLoad(explorer, explorer.root, 2);
+  assert(second, "The sweep continues at the next offset.");
+  assert(!refreshDue(explorer));
+  // The notice arrives just before the last page is delivered.
+  const done = finishLoad(
+    explorer,
+    explorer.root,
+    second,
+    page(2, [entry("c"), entry("e")], null, 4),
+  );
+  assertEquals(done.continueAt, null);
+  assertEquals(explorer.root.children.map((child: Any) => child.id), [
+    "a",
+    "b",
+    "c",
+    "e",
+  ]);
+  assert(
+    refreshDue(explorer),
+    "The pending notice asks for a trailing refresh.",
+  );
+  startRefresh(explorer);
+  assert(!explorer.dirty);
+});
+
+Deno.test("a refresh with expanded children completes only when every node is done", () => {
+  const explorer = createExplorer();
+  load(
+    explorer,
+    explorer.root,
+    0,
+    page(0, [entry("p", { has_children: true })]),
+  );
+  const parent = nodeFor(explorer, ["p"]);
+  parent.expanded = true;
+  load(explorer, parent, 0, page(0, [entry("x")]));
+  const started = startRefresh(explorer);
+  assertEquals(started.length, 2);
+  markChanged(explorer);
+  const [rootRun, parentRun] = started;
+  finishLoad(
+    explorer,
+    rootRun.node,
+    rootRun.token,
+    page(0, [
+      entry("p", { has_children: true }),
+    ]),
+  );
+  assert(!refreshDue(explorer), "The child's sweep is still running.");
+  finishLoad(explorer, parentRun.node, parentRun.token, page(0, [entry("x")]));
+  assert(refreshDue(explorer));
+});
+
+Deno.test("collapsed nodes are only marked stale by an automatic refresh", () => {
+  const explorer = createExplorer();
+  load(
+    explorer,
+    explorer.root,
+    0,
+    page(0, [entry("p", { has_children: true })]),
+  );
+  const parent = nodeFor(explorer, ["p"]);
+  parent.expanded = true;
+  load(explorer, parent, 0, page(0, [entry("x")]));
+  collapse(parent);
+  markChanged(explorer);
+  assert(refreshDue(explorer));
+  const { targets } = refreshAll(explorer);
+  assertEquals(targets, [explorer.root]);
+  assert(parent.stale);
+  assert(!parent.loading);
+  assert(expand(explorer, parent), "Expanding fetches a stale node again.");
+});
+
+Deno.test("a failed fetch is not retried on its own", () => {
+  const explorer = createExplorer();
+  load(explorer, explorer.root, 0, page(0, [entry("a")]));
+  const [run] = startRefresh(explorer);
+  markChanged(explorer);
+  assert(failLoad(explorer, run.node, run.token, "boom"));
+  assert(!explorer.dirty);
+  assert(!refreshDue(explorer));
+  // A later notice asks again.
+  markChanged(explorer);
+  assert(refreshDue(explorer));
+});
+
+Deno.test("a closed explorer ignores change notices", () => {
+  const explorer = createExplorer();
+  closeExplorer(explorer);
+  markChanged(explorer);
+  assert(!refreshDue(explorer));
 });
