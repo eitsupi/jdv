@@ -6,7 +6,7 @@
 \alias{jdv-package}
 \title{jdv: Lightweight Data Viewer}
 \description{
-A lightweight data viewer with no package dependencies. It sends data frames, lists, and other R objects, as well as 'Apache Arrow' data, over a local connection to an external viewer application, and answers the viewer's requests for sorted, filtered, and paged rows. Arrow data is read through the Arrow C stream interface and sent as Arrow IPC without conversion to R vectors.
+A lightweight data viewer with no package dependencies. It sends data frames, lists, and other R objects, as well as 'Apache Arrow' data, over a local connection to an external viewer application, and answers the viewer's requests for sorted, filtered, and paged rows. Arrow data is read through the Arrow C stream interface and sent in the Arrow inter-process communication stream format without conversion to R vectors.
 }
 \seealso{
 Useful links:
@@ -30,6 +30,7 @@ Other contributors:
   \item cJSON contributors (cJSON library in src/cjson/) [copyright holder]
   \item Apache Software Foundation (nanoarrow C library in src/nanoarrow/) [copyright holder]
   \item Mikkel F. Jørgensen (flatcc in src/nanoarrow/) [copyright holder]
+  \item Paul Hsieh (portable stdint.h bundled with flatcc in src/nanoarrow/) [contributor, copyright holder]
 }
 
 }

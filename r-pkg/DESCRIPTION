@@ -1,6 +1,6 @@
 Package: jdv
 Title: Lightweight Data Viewer
-Version: 0.0.9000
+Version: 0.1.0
 Authors@R:
     c(
       person(
@@ -31,14 +31,21 @@ Authors@R:
         "Jørgensen",
         role = "cph",
         comment = "flatcc in src/nanoarrow/"
+      ),
+      person(
+        "Paul",
+        "Hsieh",
+        role = c("ctb", "cph"),
+        comment = "portable stdint.h bundled with flatcc in src/nanoarrow/"
       )
     )
 Description: A lightweight data viewer with no package dependencies. It sends
     data frames, lists, and other R objects, as well as 'Apache Arrow' data,
     over a local connection to an external viewer application, and answers the
     viewer's requests for sorted, filtered, and paged rows. Arrow data is read
-    through the Arrow C stream interface and sent as Arrow IPC without
-    conversion to R vectors.
+    through the Arrow C stream interface and sent in the Arrow
+    inter-process communication stream format without conversion to R
+    vectors.
 License: MIT + file LICENSE
 URL: https://github.com/eitsupi/jdv
 BugReports: https://github.com/eitsupi/jdv/issues
@@ -60,5 +67,5 @@ Config/testthat/edition: 3
 Copyright: file inst/COPYRIGHTS
 Encoding: UTF-8
 NeedsCompilation: yes
-Roxygen: list(markdown = TRUE)
-RoxygenNote: 8.0.0
+Config/roxygen2/markdown: TRUE
+Config/roxygen2/version: 8.1.1
