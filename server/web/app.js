@@ -2772,7 +2772,13 @@ function loadResources(session, node, offset, options = {}) {
     const message = error?.code
       ? error.code + ": " + error.message
       : error?.message ?? String(error);
-    if (failLoad(explorer, node, token, message)) renderExplorer(session);
+    if (failLoad(explorer, node, token, message)) {
+      renderExplorer(session);
+      // A change notice that arrived during this refresh is still pending;
+      // start it now. Starting a refresh clears the flag, so a failure with
+      // no pending notice does not retry by itself.
+      refreshWhenDue(session);
+    }
   });
 }
 
