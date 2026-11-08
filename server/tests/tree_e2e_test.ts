@@ -67,6 +67,16 @@ function rEval(
   );
 }
 
+/** Evaluate through R's REPL so task callbacks (variable tracking) run. */
+function rEvalVisible(arf: ArfSession, code: string, timeoutMs = 30_000) {
+  const sequence = ++rEvaluationSequence;
+  return phase(
+    `R visible evaluation ${sequence}`,
+    () => arf.evalVisible(code, timeoutMs),
+    timeoutMs + 3_000,
+  );
+}
+
 interface Runtime {
   server: TestServer;
   arf: ArfSession;
@@ -1292,10 +1302,9 @@ Deno.test({
         );
 
         // A change while paused is not followed.
-        // The embedded REPL does not run task callbacks, so the check that
-        // the callback would make is requested explicitly.
-        await rEval(arf, "tracked_df <- mtcars[1:5, ]");
-        await rEval(arf, "jdv_rpc(NULL)");
+        // A visible evaluation runs through R's REPL, so the tracking task
+        // callback fires after it.
+        await rEvalVisible(arf, "tracked_df <- mtcars[1:5, ]");
         assertEquals(
           (pendingMessages.get(browser) ?? []).filter((message) =>
             message.type === "view/open"
@@ -1323,8 +1332,7 @@ Deno.test({
         assertEquals(asRecord(params.tracking).state, "active");
 
         // Removing the variable ends following and says why.
-        await rEval(arf, "rm(tracked_df)");
-        await rEval(arf, "jdv_rpc(NULL)");
+        await rEvalVisible(arf, "rm(tracked_df)");
         const lost = await nextMessage(
           browser,
           (message) =>

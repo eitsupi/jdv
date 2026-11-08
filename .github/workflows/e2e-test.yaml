@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@v5
       - name: Run mock producer browser E2E
         env:
           ASTRAL_BIN_ARGS: --no-sandbox --disable-dev-shm-usage
@@ -64,7 +64,7 @@ jobs:
           - macos-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@v5
 
       - uses: r-lib/actions/setup-r@v2
         with:

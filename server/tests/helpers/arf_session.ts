@@ -7,6 +7,8 @@ export interface ArfEvalResult {
   stderr: string | null;
   value: string | null;
   error: string | null;
+  /** Reported by arf 0.7.0-beta.2 and later, for example "ok". */
+  status?: string;
 }
 
 export interface ArfEvalHandle {
@@ -193,7 +195,10 @@ export class ArfSession {
   }
 
   /** Submit an evaluation without waiting for R to return to its prompt. */
-  send(code: string, options: { timeoutMs?: number } = {}): ArfEvalHandle {
+  send(
+    code: string,
+    options: { timeoutMs?: number; visible?: boolean } = {},
+  ): ArfEvalHandle {
     if (!this.#pid) throw new Error("ArfSession has not started.");
     const timeoutMs = options.timeoutMs ?? 30_000;
     const evaluation = { code, state: "pending" as const };
@@ -202,7 +207,7 @@ export class ArfSession {
     // Record the outcome immediately while preserving the original promise for
     // wait()/result consumers.
     const result = observeArfEvaluation(
-      this.#runEval(code, timeoutMs),
+      this.#runEval(code, timeoutMs, options.visible === true),
       (outcome) => {
         if (this.#lastEvaluation === evaluation) {
           this.#lastEvaluation = outcome.state === "resolved"
@@ -252,6 +257,31 @@ export class ArfSession {
     const result = await this.send(code, { timeoutMs }).wait(timeoutMs + 2_000);
     if (result.error !== null) {
       throw new Error(`R eval failed: ${result.error}`);
+    }
+    return result;
+  }
+
+  /**
+   * Evaluate through R's normal REPL (`arf ipc eval --visible`), so task
+   * callbacks, autoprinting, and `.Last.value` behave as in interactive R.
+   * The response carries no `value` or `error`; failures are reported through
+   * `status` and `stderr`. Use `eval()` when the value is needed.
+   */
+  async evalVisible(
+    code: string,
+    timeoutMs = 30_000,
+  ): Promise<ArfEvalResult> {
+    const result = await this.send(code, { timeoutMs, visible: true })
+      .wait(timeoutMs + 2_000);
+    if (
+      result.error !== null ||
+      (result.status !== undefined && result.status !== "ok")
+    ) {
+      throw new Error(
+        `R visible eval failed (${result.status ?? "unknown"}): ${
+          result.error ?? result.stderr ?? ""
+        }`,
+      );
     }
     return result;
   }
@@ -441,7 +471,11 @@ export class ArfSession {
     return this.close();
   }
 
-  async #runEval(code: string, timeoutMs: number): Promise<ArfEvalResult> {
+  async #runEval(
+    code: string,
+    timeoutMs: number,
+    visible = false,
+  ): Promise<ArfEvalResult> {
     const pid = this.#pid;
     if (!pid) throw new Error("ArfSession has not started.");
     const command = new Deno.Command("arf", {
@@ -450,6 +484,7 @@ export class ArfSession {
         "eval",
         "--pid",
         String(pid),
+        ...(visible ? ["--visible"] : []),
         "--timeout",
         String(timeoutMs),
         code,

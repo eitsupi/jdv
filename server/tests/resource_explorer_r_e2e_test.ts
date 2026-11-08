@@ -37,6 +37,16 @@ function rEval(arf: ArfSession, code: string, timeoutMs = 30_000) {
   );
 }
 
+/** Evaluate through R's REPL so task callbacks (variable tracking) run. */
+function rEvalVisible(arf: ArfSession, code: string, timeoutMs = 30_000) {
+  const sequence = ++rEvaluationSequence;
+  return phase(
+    `R visible evaluation ${sequence}`,
+    () => arf.evalVisible(code, timeoutMs),
+    timeoutMs + 3_000,
+  );
+}
+
 function rQuote(value: string): string {
   return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }
@@ -293,10 +303,9 @@ Deno.test({
             (value) => value.includes("5 rows"),
             "the initial row count",
           );
-          // The embedded REPL does not run task callbacks, so the check that
-          // the callback would make is requested explicitly.
-          await rEval(arf, "df_cars <- mtcars[1:9, ]");
-          await rEval(arf, "jdv_rpc(NULL)");
+          // A visible evaluation runs through R's REPL, so the tracking task
+          // callback fires after it.
+          await rEvalVisible(arf, "df_cars <- mtcars[1:9, ]");
           await waitForText(
             page,
             "#table-meta",

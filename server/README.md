@@ -362,12 +362,18 @@ mise exec -- deno task check
 mise exec -- deno task test:unit
 ```
 
-The configuration pins Deno 2.9.7 and arf 0.6.0. In a shell with mise activated,
-`deno task` uses the same pinned tools without the `mise exec --` prefix. The
-repository `deno.json` defines the task split, a test-only Astral import alias,
-and exclusions for formatting the vendored Tabulator and Arrow bundles. Test and
-type-check tasks enforce the committed `deno.lock`. The host uses relative
-imports, so URL startup remains self-contained with `--no-config`.
+The configuration pins Deno 2.9.7 and arf 0.7.0-beta.2. In a shell with mise
+activated, `deno task` uses the same pinned tools without the `mise exec --`
+prefix. The repository `deno.json` defines the task split, a test-only Astral
+import alias, and exclusions for formatting the vendored Tabulator and Arrow
+bundles. Test and type-check tasks enforce the committed `deno.lock`. The host
+uses relative imports, so URL startup remains self-contained with `--no-config`.
+
+The arf test helper evaluates silently by default, which returns values but does
+not run R task callbacks. Checks that depend on variable tracking use
+`evalVisible()`, which runs through R's normal REPL (`arf ipc eval --visible`,
+available since arf 0.7.0-beta.1) so the callbacks fire; its response has no
+`value` or `error`.
 
 `test:unit` lists only Deno tests that need no R, arf, or Chromium. R numeric
 and query fixtures, installed-package integration, interactive transport, Arrow
@@ -378,9 +384,10 @@ TCP server. Where the headless console remains in a framed `browser()` wait, the
 test keeps console input open to continue the frame. It also checks request
 progress while an R function is sleeping, without manual RPC polling.
 
-On Windows, arf's headless console currently returns EOF from `browser()`, so
-the interactive regression holds R with a function-scoped `Sys.sleep()` there
-instead. Holding a Windows `browser()` prompt is not yet tested.
+With arf 0.7.0-beta.2, the headless console returns EOF from `browser()` on
+every platform (earlier versions did so only on Windows), so the interactive
+regression holds R with a function-scoped `Sys.sleep()` instead. Holding a
+`browser()` prompt is not yet tested.
 
 For the integration task, install jdv into a scratch library and install the
 optional R packages arrow, nanoarrow, jsonlite, bit64, and polars. Set

@@ -412,7 +412,7 @@ Deno.test({
       const env = Deno.env.toObject();
       env.XDG_CACHE_HOME = cacheRoot;
       env.JDV_ADDRESS = `tcp://127.0.0.1:${proxyPort}`;
-      // The Windows console EOF diagnostic is emitted at the sys module's
+      // The console EOF diagnostic is emitted at the sys module's
       // debug level. Keep that evidence enabled for this test session.
       env.RUST_LOG ??= "arf_libr::sys=debug";
       if (testLibrary) env.R_LIBS_USER = testLibrary;
@@ -666,8 +666,8 @@ Deno.test({
           eofLogWasNew: eofLog.found,
         };
         assert(
-          isConfirmedWindowsBrowserEof(browserEofEvidence),
-          `The browser evaluation returned before console continuation, but the Windows arf EOF evidence was incomplete: ${
+          isConfirmedBrowserEof(browserEofEvidence),
+          `The browser evaluation returned before console continuation, but the arf EOF evidence was incomplete: ${
             JSON.stringify({
               ...browserEofEvidence,
               browserLog: eofLog.contents,
@@ -675,8 +675,8 @@ Deno.test({
           }.`,
         );
         // TODO: arf headless does not register a ReadConsole callback, so
-        // browser input returns EOF (confirmed in v0.6.0 through
-        // v0.7.0-alpha.1). Restore browser()-held verification on Windows
+        // browser input returns EOF (confirmed on Windows in v0.6.0 through
+        // v0.7.0-alpha.1, and on every platform in v0.7.0-beta.2). Restore browser()-held verification
         // once arf fixes this.
         heldKind = "sleep-frame";
         const sleepHoldMarkers = await markerPath();
@@ -730,7 +730,7 @@ Deno.test({
         heldRowsId = "interactive-sleep-frame-rows";
         heldRowOffset = 2;
         console.log(
-          `interactive regression: Windows arf browser EOF confirmed by a new log entry; browser hold is not treated as validated; function-scoped Sys.sleep frame depth ${sleepStartFrameDepth} is used for the transport hold`,
+          `interactive regression: arf browser EOF confirmed by a new log entry; browser hold is not treated as validated; function-scoped Sys.sleep frame depth ${sleepStartFrameDepth} is used for the transport hold`,
         );
       } else {
         assert(
@@ -1201,7 +1201,7 @@ Deno.test("RawWebSocket answers ping frames and keeps reading text messages", as
   }
 });
 
-Deno.test("Windows arf browser EOF requires the full observed evidence", () => {
+Deno.test("arf browser EOF requires the full observed evidence", () => {
   const evidence: BrowserEofEvidence = {
     os: "windows",
     browserStartedMarker: "BROWSER_STARTED:2",
@@ -1211,31 +1211,31 @@ Deno.test("Windows arf browser EOF requires the full observed evidence", () => {
     eofLogWasNew: true,
   };
   assert(
-    isConfirmedWindowsBrowserEof(evidence),
-    "The complete Windows browser EOF evidence was rejected.",
+    isConfirmedBrowserEof(evidence),
+    "The complete browser EOF evidence was rejected.",
   );
   assert(
-    !isConfirmedWindowsBrowserEof({ ...evidence, os: "linux" }),
-    "The Windows EOF fixture was incorrectly enabled on Linux.",
+    !isConfirmedBrowserEof({ ...evidence, browserDone: false }),
+    "The browser EOF fixture accepted a missing completion marker.",
   );
   assert(
-    !isConfirmedWindowsBrowserEof({ ...evidence, browserDone: false }),
-    "The Windows EOF fixture accepted a missing completion marker.",
+    !isConfirmedBrowserEof({ ...evidence, browserStartFrameDepth: 0 }),
+    "The browser EOF fixture accepted a missing function frame.",
   );
   assert(
-    !isConfirmedWindowsBrowserEof({ ...evidence, browserStartFrameDepth: 0 }),
-    "The Windows EOF fixture accepted a missing function frame.",
-  );
-  assert(
-    !isConfirmedWindowsBrowserEof({
+    !isConfirmedBrowserEof({
       ...evidence,
       browserEvaluationError: "R evaluation failed",
     }),
-    "The Windows EOF fixture accepted a failed R evaluation.",
+    "The browser EOF fixture accepted a failed R evaluation.",
   );
   assert(
-    !isConfirmedWindowsBrowserEof({ ...evidence, eofLogWasNew: false }),
-    "The Windows EOF fixture accepted an old or absent EOF log entry.",
+    isConfirmedBrowserEof({ ...evidence, os: "linux", eofLogWasNew: false }),
+    "The browser EOF fixture required the Windows log entry on Linux.",
+  );
+  assert(
+    !isConfirmedBrowserEof({ ...evidence, eofLogWasNew: false }),
+    "The browser EOF fixture accepted an old or absent EOF log entry.",
   );
 });
 
@@ -1332,12 +1332,14 @@ interface BrowserEofEvidence {
   eofLogWasNew: boolean;
 }
 
-function isConfirmedWindowsBrowserEof(evidence: BrowserEofEvidence): boolean {
-  return evidence.os === "windows" &&
-    evidence.browserStartedMarker.startsWith("BROWSER_STARTED:") &&
+function isConfirmedBrowserEof(evidence: BrowserEofEvidence): boolean {
+  return evidence.browserStartedMarker.startsWith("BROWSER_STARTED:") &&
     Number.isSafeInteger(evidence.browserStartFrameDepth) &&
     evidence.browserStartFrameDepth > 0 && evidence.browserDone &&
-    evidence.browserEvaluationError === null && evidence.eofLogWasNew;
+    evidence.browserEvaluationError === null &&
+    // Only the Windows build logs the EOF diagnostic; arf 0.7.0-beta.2 on
+    // other platforms ends the nested read without that message.
+    (evidence.os !== "windows" || evidence.eofLogWasNew);
 }
 
 async function settleWithin<T>(
