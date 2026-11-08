@@ -83,6 +83,7 @@ res_methods <- function(messages = jdv_notifications()) {
 }
 
 test_that("the root lists global bindings with kind, summary, and class", {
+  skip_if_not(.jdv_track_supported(), "reading bindings needs R 4.6.0 or later")
   res_session()
   res_assign(
     jdvres_df = mtcars,
@@ -138,12 +139,98 @@ test_that("the root lists global bindings with kind, summary, and class", {
   }
   expect_identical(listed$jdvres_df$class, list("data.frame"))
   expect_identical(listed$jdvres_df$type, "list")
-  expect_identical(listed$jdvres_df$summary, "data.frame (11)")
-  expect_identical(listed$jdvres_chr$summary, "character (2): a, b")
+  expect_identical(listed$jdvres_df$summary, "data.frame [32 \u00d7 11]")
+  expect_identical(listed$jdvres_mat$summary, "matrix integer [2 \u00d7 3]")
+  expect_identical(listed$jdvres_list$summary, "list (2)")
+  expect_identical(listed$jdvres_chr$summary, "character (2)")
+  expect_identical(listed$jdvres_factor$summary, "factor (2)")
+  expect_identical(listed$jdvres_fun$summary, "function")
+  expect_identical(listed$jdvres_prim$summary, "function")
   expect_identical(listed$jdvres_mat$class, list("matrix", "array"))
   # An environment summary has no binding count, so listing never walks one.
   expect_identical(listed$jdvres_self$summary, "environment")
   expect_identical(listed$jdvres_env$summary, "environment")
+})
+
+test_that("listing never calls methods defined for the listed objects", {
+  skip_if_not(.jdv_track_supported(), "reading bindings needs R 4.6.0 or later")
+  res_session()
+  calls <- new.env()
+  calls$n <- 0L
+  hit <- function(...) {
+    calls$n <- calls$n + 1L
+    stop("a method must not run while listing")
+  }
+  rows <- data.frame(a = 1:3, b = c("x", "y", "z"))
+  class(rows) <- c("jdvres_cls", "data.frame")
+  mat <- structure(matrix(1:6, 2L), class = "jdvres_cls")
+  vec <- structure(c(1.5, 2.5, 3.5, 4.5), class = "jdvres_cls")
+  lst <- structure(list(1, 2, 3), class = "jdvres_cls")
+  fun <- structure(function(x) x, class = "jdvres_cls")
+  env <- structure(new.env(), class = "jdvres_cls")
+  res_assign(
+    jdvres_dfc = rows,
+    jdvres_matc = mat,
+    jdvres_vecc = vec,
+    jdvres_lstc = lst,
+    jdvres_func = fun,
+    jdvres_envc = env
+  )
+  methods::setClass("JdvresS4", representation(x = "numeric"))
+  withr::defer(methods::removeClass("JdvresS4"))
+  s4 <- methods::new("JdvresS4", x = 1)
+  generics <- c(
+    "length",
+    "format",
+    "print",
+    "dim",
+    "names",
+    "levels",
+    "toString",
+    "as.character",
+    "[",
+    "[[",
+    "$",
+    "nrow",
+    "summary",
+    "dimnames",
+    "row.names"
+  )
+  methods_s3 <- paste0(generics, ".jdvres_cls")
+  for (name in methods_s3) {
+    assign(name, hit, envir = globalenv())
+  }
+  withr::defer(rm(list = methods_s3, envir = globalenv()))
+  for (generic in c("length", "names", "dim")) {
+    methods::setMethod(generic, "JdvresS4", function(x) hit())
+  }
+  methods::setMethod("show", "JdvresS4", function(object) hit())
+  methods::setMethod("[", "JdvresS4", function(x, i, j, ..., drop = TRUE) hit())
+  withr::defer(
+    for (generic in c("length", "names", "dim", "show", "[")) {
+      methods::removeMethod(generic, "JdvresS4")
+    }
+  )
+  res_assign(jdvres_s4 = s4)
+
+  listed <- res_by_label()
+  # Page through the root as a host would.
+  paged <- res_all(limit = 7)
+  expect_gte(length(paged), length(listed))
+  expect_identical(calls$n, 0L)
+  expect_identical(
+    listed$jdvres_dfc$summary,
+    "jdvres_cls/data.frame [3 \u00d7 2]"
+  )
+  expect_identical(
+    listed$jdvres_matc$summary,
+    "jdvres_cls integer [2 \u00d7 3]"
+  )
+  expect_identical(listed$jdvres_vecc$summary, "jdvres_cls (4)")
+  expect_identical(listed$jdvres_lstc$summary, "jdvres_cls (3)")
+  expect_identical(listed$jdvres_func$summary, "jdvres_cls")
+  expect_identical(listed$jdvres_envc$summary, "jdvres_cls")
+  expect_identical(listed$jdvres_s4$summary, "JdvresS4")
 })
 
 test_that("dot names are hidden and every name is listed", {
@@ -152,7 +239,7 @@ test_that("dot names are hidden and every name is listed", {
   listed <- res_by_label()
   expect_true(listed$.jdvres_hidden$hidden)
   expect_null(listed$jdvres_shown$hidden)
-  expect_true(listed$.jdvres_hidden$viewable)
+  expect_identical(listed$.jdvres_hidden$viewable, .jdv_track_supported())
   expect_identical(listed$.jdvres_hidden$id, "b:.jdvres_hidden")
 })
 
@@ -310,7 +397,7 @@ test_that("unevaluated promises and active bindings are never evaluated", {
   expect_identical(listed$jdvres_active$unavailable, "active_binding")
   expect_false(listed$jdvres_active$viewable)
   expect_identical(listed$jdvres_active$kind, "unknown")
-  expect_true(listed$jdvres_plain$viewable)
+  expect_identical(listed$jdvres_plain$viewable, .jdv_track_supported())
   expect_identical(
     listed$jdvres_promise$unavailable,
     if (.jdv_track_supported()) "delayed_binding" else "opaque_binding"
@@ -358,6 +445,39 @@ test_that("an older R lists names only and keeps values opaque", {
   expect_identical(opened$error$code, "unavailable")
 })
 
+test_that("an older R lists every name, with ids, hidden flags, and paging", {
+  res_session()
+  res_assign(.jdvres_a = 1, jdvres_b = mtcars, jdvres_c = "x")
+  local_mocked_bindings(
+    .jdv_tree_binding_read = function(env, name) {
+      list(status = "opaque", value = NULL)
+    }
+  )
+  listed <- res_by_label()
+  expect_identical(
+    names(listed),
+    c(".jdvres_a", "jdvres_b", "jdvres_c")[
+      order(c(".jdvres_a", "jdvres_b", "jdvres_c"), method = "radix")
+    ]
+  )
+  for (child in listed) {
+    expect_identical(child$kind, "unknown")
+    expect_false(child$viewable)
+    expect_identical(child$unavailable, "opaque_binding")
+    expect_identical(child$id, paste0("b:", child$label))
+  }
+  expect_true(listed$.jdvres_a$hidden)
+  expect_null(listed$jdvres_b$hidden)
+  page <- res_children(offset = 0, limit = 2)$result
+  expect_length(page$children, 2L)
+  expect_equal(page$next_offset, 2L)
+  expect_identical(
+    res_rpc("resources/open", list(node = "b:jdvres_c"))$error$code,
+    "unavailable"
+  )
+  expect_length(ls(.jdv_state$entries, all.names = TRUE), 0L)
+})
+
 test_that("ids round-trip non-ASCII, long, and non-UTF-8 names", {
   res_session()
   long <- paste0(res_prefix, strrep("x", 3000L))
@@ -372,16 +492,18 @@ test_that("ids round-trip non-ASCII, long, and non-UTF-8 names", {
   long_child <- listed[[match(substr(long, 1L, 1000L), labels)]]
   expect_identical(nchar(long_child$label), 1000L)
   expect_identical(long_child$id, paste0("b:", long))
-  expect_true(long_child$viewable)
+  expect_identical(long_child$viewable, .jdv_track_supported())
   unicode_child <- listed[[match(unicode, enc2utf8(labels))]]
   expect_identical(enc2utf8(unicode_child$id), paste0("b:", unicode))
 
-  opened <- res_rpc("resources/open", list(node = long_child$id))
-  expect_null(opened$error)
-  expect_equal(opened$result$nrow, 2)
-  opened <- res_rpc("resources/open", list(node = unicode_child$id))
-  expect_null(opened$error)
-  expect_equal(opened$result$nrow, 3)
+  if (.jdv_track_supported()) {
+    opened <- res_rpc("resources/open", list(node = long_child$id))
+    expect_null(opened$error)
+    expect_equal(opened$result$nrow, 2)
+    opened <- res_rpc("resources/open", list(node = unicode_child$id))
+    expect_null(opened$error)
+    expect_equal(opened$result$nrow, 3)
+  }
 
   # Bytes that are not UTF-8 travel as hex.
   bytes <- paste0(res_prefix, "\xff\xfe")
@@ -407,8 +529,10 @@ test_that("ids round-trip non-ASCII, long, and non-UTF-8 names", {
     res_cleanup(bytes)
     child <- Filter(function(child) identical(child$id, id), res_mine())
     expect_length(child, 1L)
-    expect_true(child[[1L]]$viewable)
-    expect_null(res_rpc("resources/open", list(node = id))$error)
+    expect_identical(child[[1L]]$viewable, .jdv_track_supported())
+    if (.jdv_track_supported()) {
+      expect_null(res_rpc("resources/open", list(node = id))$error)
+    }
   }
 })
 
@@ -430,6 +554,7 @@ test_that("an id past the limit is omitted with id_limit", {
 })
 
 test_that("resources/open opens grid and tree views with reason resource", {
+  skip_if_not(.jdv_track_supported(), "reading bindings needs R 4.6.0 or later")
   res_session()
   res_assign(
     jdvres_df = mtcars,
@@ -503,6 +628,7 @@ test_that("every open creates a new view that follows the binding", {
 })
 
 test_that("open honors mode and collation like object/open", {
+  skip_if_not(.jdv_track_supported(), "reading bindings needs R 4.6.0 or later")
   res_session()
   res_assign(jdvres_df = mtcars)
   paged <- res_rpc(
@@ -533,6 +659,7 @@ test_that("open honors mode and collation like object/open", {
 })
 
 test_that("unknown request members are ignored", {
+  skip_if_not(.jdv_track_supported(), "reading bindings needs R 4.6.0 or later")
   res_session()
   res_assign(jdvres_df = mtcars)
   expect_null(res_children(limit = 1, extra = TRUE)$error)
@@ -542,6 +669,7 @@ test_that("unknown request members are ignored", {
 })
 
 test_that("resource views carry the variable name as a display title", {
+  skip_if_not(.jdv_track_supported(), "reading bindings needs R 4.6.0 or later")
   res_session()
   res_assign(jdvres_df = mtcars, `jdvres non syntactic` = list(a = 1))
   plain <- res_rpc("resources/open", list(node = "b:jdvres_df"))$result
@@ -576,6 +704,7 @@ test_that("resource views carry the variable name as a display title", {
 })
 
 test_that("open rejects ids that are not ours or no longer exist", {
+  skip_if_not(.jdv_track_supported(), "reading bindings needs R 4.6.0 or later")
   res_session()
   res_assign(jdvres_df = mtcars)
   for (node in list(
@@ -609,6 +738,7 @@ test_that("open rejects ids that are not ours or no longer exist", {
 })
 
 test_that("listing never closes views and closing never changes the list", {
+  skip_if_not(.jdv_track_supported(), "reading bindings needs R 4.6.0 or later")
   res_session()
   res_assign(jdvres_df = mtcars)
   opened <- res_rpc("resources/open", list(node = "b:jdvres_df"))$result
@@ -623,6 +753,7 @@ test_that("listing never closes views and closing never changes the list", {
 })
 
 test_that("open respects the view limit", {
+  skip_if_not(.jdv_track_supported(), "reading bindings needs R 4.6.0 or later")
   res_session()
   res_assign(jdvres_df = mtcars)
   old <- options(jdv.max_tables = 2)
@@ -645,6 +776,7 @@ test_that("open respects the view limit", {
 })
 
 test_that("a response that cannot be built closes the view silently", {
+  skip_if_not(.jdv_track_supported(), "reading bindings needs R 4.6.0 or later")
   res_session()
   res_assign(
     jdvres_wide = as.data.frame(stats::setNames(
@@ -669,15 +801,16 @@ test_that("a response that cannot be built closes the view silently", {
 })
 
 test_that("a children page too large for one message is shortened", {
+  skip_if_not(.jdv_track_supported(), "reading bindings needs R 4.6.0 or later")
   res_session()
   texts <- replicate(
     12L,
-    paste(rep(strrep("w", 150L), 5L), collapse = " "),
+    structure(1, class = rep(strrep("w", 150L), 5L)),
     simplify = FALSE
   )
   names(texts) <- sprintf("jdvres_long_%02d", 1:12)
   do.call(res_assign, texts)
-  # The character vectors each need a few hundred bytes of summary.
+  # The long class names each need a few hundred bytes of summary.
   old <- options(jdv.max_message_bytes = 4096)
   on.exit(options(old), add = TRUE)
   offsets <- numeric()
@@ -753,7 +886,12 @@ test_that("changing jdv.resources after hello keeps the session contract", {
   on.exit(options(old), add = TRUE)
   expect_null(res_children(limit = 1)$error)
   res_assign(jdvres_df = mtcars)
-  expect_null(res_rpc("resources/open", list(node = "b:jdvres_df"))$error)
+  opened <- res_rpc("resources/open", list(node = "b:jdvres_df"))
+  if (.jdv_track_supported()) {
+    expect_null(opened$error)
+  } else {
+    expect_identical(opened$error$code, "unavailable")
+  }
 })
 
 test_that("a single non-FALSE value of jdv.resources keeps it enabled", {
@@ -789,6 +927,7 @@ test_that("handles do not accept resource requests", {
 })
 
 test_that("a viewer connection serves resources before any view", {
+  skip_if_not(.jdv_track_supported(), "reading bindings needs R 4.6.0 or later")
   skip_on_cran()
   skip_on_os("windows")
   skip_if_not_installed("callr")

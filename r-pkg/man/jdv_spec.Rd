@@ -851,9 +851,12 @@ does not send its \code{view/open}.
 
 The opened view is a top-level view and has no parent view. It follows the
 usual view lifecycle and descriptor capabilities, including the producer's
-view limits. Listing or refreshing the resource tree never closes it, and
-closing it does not change the resource tree. Every successful open creates a
-new view, even for a node that is already open.
+view limits. Listing or refreshing the resource tree does not affect any view,
+and closing a view does not change the resource tree. Opening a node
+registers a view like any other, so when the producer is at its view limit it
+may close an existing view to make room, and \code{view/closed} is sent as usual.
+Every successful open creates a new view, even for a node that is already
+open.
 
 Opening is not idempotent. After a host cancels a sent \code{resources/open} or
 its deadline expires, the view may still be opened and its \code{view/open} may
@@ -921,11 +924,16 @@ The kind is decided from the type and the class attribute alone. No
 \code{jdv_source()} method or other S3 method is called to choose it, so the view
 that finally opens is known only from its \code{view/open} descriptor. The R
 extension fields \code{class} and \code{type} have the same meaning as in
-\code{object/children}. \code{summary} is the bounded summary of \code{object/children}, at
-most 1,000 code points with the same depth and element limits, except that
-the summary of an environment has no binding count. The summary of an object
-with a \code{format()} method for its class may call that method, as the summary
-in \code{object/children} does.
+\code{object/children}. \code{summary} is at most 1,000 code points and is built
+without calling any S3 or S4 method defined for the value, because the root
+is listed without the user choosing individual objects: it never reads
+elements, calls \code{format()}, or calls a generic such as \code{length()}, \code{dim()},
+\code{names()}, or \code{[}. It is the class (or type) name followed by the stored
+size: \verb{data.frame [32 × 11]} (rows and columns), \verb{matrix double [3 × 4]},
+\code{double (100)}, \code{factor (150)}, \code{list (5)}, \code{function}, \code{environment} (no
+binding count), and the class name of an S4 object. A length is the stored
+length of the object, not the result of a user-defined \code{length()} method.
+The summary after a value is opened with \code{object/children} is unchanged.
 
 A binding is read without evaluating it. Promises that have not been forced,
 active bindings, and missing arguments are listed with \code{viewable: false} and
@@ -950,7 +958,8 @@ view is closed if the response cannot be built. Opening counts against
 the binding as \code{\link[=jdv_view]{jdv_view()}} does: the descriptor carries \code{tracking}, refresh
 reads the current value, and a reassigned variable updates the view. A value
 that is a sequential stream, or an R version before 4.6.0, gives a view
-without tracking. Listing or opening never closes an existing view.
+without tracking. Listing never closes a view, and opening may close the
+oldest view when \code{jdv.max_tables} is reached.
 
 A children page that does not fit \code{jdv.max_message_bytes} is shortened to
 fewer children, with \code{next_offset} pointing at the first child left out. A

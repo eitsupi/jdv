@@ -128,6 +128,74 @@
   }
 }
 
+# The one-line summary of a listed value, built from `info` and the stored
+# `dim` and `row.names` attributes alone. It reads no element and calls no
+# function that can dispatch on the class of the value: attr(),
+# .row_names_info() and the C reader behind `info` are not generic, whereas
+# length(), dim(), names(), levels(), `[` and format() are (?InternalMethods).
+# A length is therefore the stored length of the object, which a user-defined
+# length() method may disagree with.
+.jdv_resource_summary <- function(x, info) {
+  label <- .jdv_tree_class_text(info)
+  type <- info$type
+  stored_length <- function() {
+    paste0(" (", format(max(0, info$length), scientific = FALSE), ")")
+  }
+  text <- if (
+    !length(info$class) && type %in% c("closure", "builtin", "special")
+  ) {
+    "function"
+  } else if (identical(type, "environment") || identical(type, "s4")) {
+    label
+  } else if ("data.frame" %in% info$class && identical(type, "list")) {
+    rows <- tryCatch(
+      .row_names_info(x, 2L),
+      error = function(error) NA_integer_
+    )
+    if (length(rows) == 1L && !is.na(rows)) {
+      paste0(
+        label,
+        " [",
+        format(abs(rows), scientific = FALSE),
+        " \u00d7 ",
+        format(info$length, scientific = FALSE),
+        "]"
+      )
+    } else {
+      paste0(label, stored_length())
+    }
+  } else if (
+    type %in% .jdv_tree_atomic_types &&
+      (isTRUE(info$is_array) || isTRUE(info$is_matrix))
+  ) {
+    dims <- attr(x, "dim", exact = TRUE)
+    if (is.numeric(dims) && !is.object(dims) && length(dims) && !anyNA(dims)) {
+      shape <- paste(
+        format(dims, scientific = FALSE, trim = TRUE),
+        collapse = " \u00d7 "
+      )
+      kind <- if (length(info$class)) {
+        label
+      } else if (isTRUE(info$is_matrix)) {
+        "matrix"
+      } else {
+        "array"
+      }
+      paste0(kind, " ", type, " [", shape, "]")
+    } else {
+      paste0(label, stored_length())
+    }
+  } else if (
+    type %in%
+      c(.jdv_tree_atomic_types, "list", "expression", "pairlist", "dots")
+  ) {
+    paste0(label, stored_length())
+  } else {
+    label
+  }
+  enc2utf8(substr(text, 1L, .jdv_tree_text_limit))
+}
+
 .jdv_resource_summaries <- c(
   delayed_binding = "Promise that has not been evaluated",
   active_binding = "Active binding",
@@ -171,12 +239,7 @@
             kind = .jdv_resource_kind(info),
             class = .jdv_tree_class(info),
             type = .jdv_tree_typeof(info),
-            summary = .jdv_tree_summary(
-              read$value,
-              0L,
-              info,
-              count_environment = FALSE
-            )
+            summary = .jdv_resource_summary(read$value, info)
           )
         },
         error = function(error) NULL

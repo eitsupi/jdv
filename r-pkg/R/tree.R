@@ -485,15 +485,7 @@
   )
 }
 
-# `count_environment = FALSE` leaves the binding count out of an environment
-# summary; counting needs a full `ls()`, which a caller that summarizes many
-# values cannot afford.
-.jdv_tree_summary <- function(
-  x,
-  depth = 0L,
-  info = .jdv_tree_info(x),
-  count_environment = TRUE
-) {
+.jdv_tree_summary <- function(x, depth = 0L, info = .jdv_tree_info(x)) {
   type <- info$type
   class_text <- .jdv_tree_class_text(info)
   list_format <- .jdv_tree_has_list_format(x, info)
@@ -523,9 +515,6 @@
       text <- paste0(text, ": ", paste(preview$values, collapse = ", "))
     }
     return(enc2utf8(substr(text, 1L, .jdv_tree_text_limit)))
-  }
-  if (identical(type, "environment") && !count_environment) {
-    return(enc2utf8(substr(class_text, 1L, .jdv_tree_text_limit)))
   }
   count <- if (identical(type, "environment")) {
     length(base::ls(envir = x, all.names = TRUE))
