@@ -696,13 +696,43 @@ Deno.test("a failed fetch is not retried on its own", () => {
   const explorer = createExplorer();
   load(explorer, explorer.root, 0, page(0, [entry("a")]));
   const [run] = startRefresh(explorer);
-  markChanged(explorer);
   assert(failLoad(explorer, run.node, run.token, "boom"));
+  // Nothing is pending, so nothing asks again until a notice arrives.
   assert(!explorer.dirty);
   assert(!refreshDue(explorer));
-  // A later notice asks again.
   markChanged(explorer);
   assert(refreshDue(explorer));
+});
+
+Deno.test("a failure keeps the notice that arrived during the sweep", () => {
+  const explorer = createExplorer();
+  load(
+    explorer,
+    explorer.root,
+    0,
+    page(0, [entry("p", { has_children: true })]),
+  );
+  const parent = nodeFor(explorer, ["p"]);
+  parent.expanded = true;
+  load(explorer, parent, 0, page(0, [entry("x")]));
+  const runs = startRefresh(explorer);
+  assertEquals(runs.length, 2);
+  markChanged(explorer);
+  assert(!refreshDue(explorer), "Fetches in flight defer the refresh.");
+  assert(failLoad(explorer, runs[1].node, runs[1].token, "boom"));
+  assert(explorer.dirty, "The failure does not erase the new notice.");
+  finishLoad(
+    explorer,
+    runs[0].node,
+    runs[0].token,
+    page(0, [entry("p", { has_children: true })]),
+  );
+  assert(refreshDue(explorer), "The pending notice asks for another refresh.");
+  // That refresh clears the flag; a failure alone does not start another.
+  const again = startRefresh(explorer);
+  assert(!explorer.dirty);
+  for (const run of again) failLoad(explorer, run.node, run.token, "boom");
+  assert(!refreshDue(explorer));
 });
 
 Deno.test("a closed explorer ignores change notices", () => {

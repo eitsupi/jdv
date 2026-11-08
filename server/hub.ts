@@ -1453,7 +1453,7 @@ export class Hub {
       this.#reconcile(session);
     }, timeout);
     subscription.waiters.push(waiter);
-    this.#reconcile(session, timeout);
+    this.#reconcile(session);
   }
 
   // Removes a waiter that ends without an answer. An enable that was never
@@ -1483,8 +1483,11 @@ export class Hub {
 
   // Moves the producer towards the state the subscribed clients want. Only one
   // producer request is outstanding; a change of wishes while it runs is
-  // handled when it ends.
-  #reconcile(session: ProducerSession, timeout = DEFAULT_TIMEOUT_MS): void {
+  // handled when it ends. The producer request has the hub's own deadline: it
+  // is shared by every waiting client, so it must not follow the deadline of
+  // whichever client happened to start it. Each client's wait ends on its own
+  // timer, and the outcome of the producer request still updates the state.
+  #reconcile(session: ProducerSession): void {
     const subscription = session.subscription;
     if (session.closed || subscription.inflight) return;
     const desired = subscription.wanted.size > 0;
@@ -1494,7 +1497,7 @@ export class Hub {
         null,
         "",
         session,
-        { method: "resources/subscribe", timeoutMs: timeout },
+        { method: "resources/subscribe", timeoutMs: DEFAULT_TIMEOUT_MS },
         { enabled: desired },
         {
           scope: { kind: "session" },

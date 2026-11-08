@@ -657,8 +657,9 @@ Deno.test({
           "no callback set, returning 0",
           2_000,
         );
+        // The arf log line is auxiliary: it is reported but not required,
+        // because arf 0.7.0 ends the nested read without it on every platform.
         const browserEofEvidence = {
-          os: Deno.build.os,
           browserStartedMarker,
           browserStartFrameDepth,
           browserDone,
@@ -676,7 +677,7 @@ Deno.test({
         );
         // TODO: arf headless does not register a ReadConsole callback, so
         // browser input returns EOF (confirmed on Windows in v0.6.0 through
-        // v0.7.0-alpha.1, and on every platform in v0.7.0-beta.2). Restore browser()-held verification
+        // v0.7.0-alpha.1, and on every platform since v0.7.0-beta.2). Restore browser()-held verification
         // once arf fixes this.
         heldKind = "sleep-frame";
         const sleepHoldMarkers = await markerPath();
@@ -1203,7 +1204,6 @@ Deno.test("RawWebSocket answers ping frames and keeps reading text messages", as
 
 Deno.test("arf browser EOF requires the full observed evidence", () => {
   const evidence: BrowserEofEvidence = {
-    os: "windows",
     browserStartedMarker: "BROWSER_STARTED:2",
     browserStartFrameDepth: 2,
     browserDone: true,
@@ -1230,12 +1230,12 @@ Deno.test("arf browser EOF requires the full observed evidence", () => {
     "The browser EOF fixture accepted a failed R evaluation.",
   );
   assert(
-    isConfirmedBrowserEof({ ...evidence, os: "linux", eofLogWasNew: false }),
-    "The browser EOF fixture required the Windows log entry on Linux.",
+    isConfirmedBrowserEof({ ...evidence, eofLogWasNew: false }),
+    "The browser EOF fixture required the optional arf log entry.",
   );
   assert(
-    !isConfirmedBrowserEof({ ...evidence, eofLogWasNew: false }),
-    "The browser EOF fixture accepted an old or absent EOF log entry.",
+    isConfirmedBrowserEof(evidence),
+    "The browser EOF fixture rejected evidence that includes the log entry.",
   );
 });
 
@@ -1324,11 +1324,12 @@ function delay(milliseconds: number): Promise<void> {
 type MarkerObservation = { time: number } | { error: unknown };
 
 interface BrowserEofEvidence {
-  os: string;
   browserStartedMarker: string;
   browserStartFrameDepth: number;
   browserDone: boolean;
   browserEvaluationError: string | null;
+  // Auxiliary: arf may or may not log the EOF, depending on version and
+  // platform, so it never decides the outcome.
   eofLogWasNew: boolean;
 }
 
@@ -1336,10 +1337,7 @@ function isConfirmedBrowserEof(evidence: BrowserEofEvidence): boolean {
   return evidence.browserStartedMarker.startsWith("BROWSER_STARTED:") &&
     Number.isSafeInteger(evidence.browserStartFrameDepth) &&
     evidence.browserStartFrameDepth > 0 && evidence.browserDone &&
-    evidence.browserEvaluationError === null &&
-    // Only the Windows build logs the EOF diagnostic; arf 0.7.0-beta.2 on
-    // other platforms ends the nested read without that message.
-    (evidence.os !== "windows" || evidence.eofLogWasNew);
+    evidence.browserEvaluationError === null;
 }
 
 async function settleWithin<T>(

@@ -453,10 +453,12 @@ TCP server. Where the headless console remains in a framed `browser()` wait, the
 test keeps console input open to continue the frame. It also checks request
 progress while an R function is sleeping, without manual RPC polling.
 
-With arf 0.7.0-beta.2, the headless console returns EOF from `browser()` on
-every platform (earlier versions did so only on Windows), so the interactive
-regression holds R with a function-scoped `Sys.sleep()` instead. Holding a
-`browser()` prompt is not yet tested.
+With arf 0.7.0, the headless console returns EOF from `browser()` on every
+platform (earlier versions did so only on Windows), so the interactive
+regression holds R with a function-scoped `Sys.sleep()` instead. The EOF is
+confirmed from the frame depth at `browser()` and the completion marker on every
+platform; arf's `no callback set` log line is only reported, not required.
+Holding a `browser()` prompt is not yet tested.
 
 For the integration task, install jdv into a scratch library and install the
 optional R packages arrow, nanoarrow, jsonlite, bit64, and polars. Set

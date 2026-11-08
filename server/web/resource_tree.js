@@ -316,9 +316,11 @@ export function failLoad(explorer, node, token, message) {
   node.requestId = null;
   node.error = message;
   node.failedOffset = token.offset;
-  // A failed fetch is never retried on its own: the next change notice or a
-  // manual Refresh asks again.
-  explorer.dirty = false;
+  // A failure says nothing about change notices: `dirty` stays as it is, so a
+  // notice that arrived while the sweep ran is not lost. The caller starts no
+  // trailing refresh after a failure; the next completed fetch, a collapse, a
+  // change notice or a manual Refresh asks again. `refreshAll` is the only
+  // place that clears the flag, so a failing fetch cannot retry in a loop.
   return true;
 }
 

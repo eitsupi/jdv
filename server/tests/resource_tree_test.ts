@@ -1579,18 +1579,18 @@ Deno.test("a mismatching subscribe response is an error and is not trusted", asy
   }
 });
 
-Deno.test("a subscribe request that times out is undone and a late answer is ignored", async () => {
+Deno.test("a client wait that times out withdraws its enable and the late answer is reconciled", async () => {
   const f = await changesSetup("chg-timeout");
   try {
     ask(f, f.browser, "on", true, { timeoutMs: 100 });
     const enable = await nthSubscribe(f.connection, 1);
     assertEquals(code(await f.browser.terminal("on")), "timeout");
-    await waitFor(() => methodsWritten(f.connection, "cancel").length === 1);
-    // The outcome is unknown, so the hub asks for the state it wants.
+    // The producer request has its own deadline and is not cancelled.
+    assertEquals(methodsWritten(f.connection, "cancel").length, 0);
+    // The late answer enables the producer, which nobody wants any more.
+    answer(f.connection, enable, true);
     const disable = await nthSubscribe(f.connection, 2);
     assertEquals(disable.params, { enabled: false });
-    // The late answer to the first request changes nothing.
-    answer(f.connection, enable, true);
     answer(f.connection, disable, false);
     await settle();
     changedFrom(f.connection, {});
@@ -1606,6 +1606,29 @@ Deno.test("a subscribe request that times out is undone and a late answer is ign
     assertEquals(again.params, { enabled: true });
     answer(f.connection, again, true);
     assertEquals((await f.browser.terminal("on2")).type, "response");
+  } finally {
+    f.hub.close();
+  }
+});
+
+Deno.test("a short client deadline does not shorten the producer request shared with a longer wait", async () => {
+  const f = await changesSetup("chg-shared-deadline");
+  const other = extraBrowser(f);
+  try {
+    ask(f, f.browser, "a-on", true, { timeoutMs: 100 });
+    const enable = await nthSubscribe(f.connection, 1);
+    ask(f, other, "b-on", true, { timeoutMs: 60_000 });
+    assertEquals(code(await f.browser.terminal("a-on")), "timeout");
+    // Answer after A's deadline and after the time A's deadline would have
+    // given the producer request.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assertEquals(methodsWritten(f.connection, "cancel").length, 0);
+    answer(f.connection, enable, true);
+    assertEquals((await other.terminal("b-on")).type, "response");
+    changedFrom(f.connection, {});
+    await waitFor(() => changedMessages(other).length === 1);
+    assertEquals(changedMessages(f.browser).length, 0);
+    assertEquals(subscribeValues(f.connection), [true]);
   } finally {
     f.hub.close();
   }
