@@ -53,3 +53,14 @@ then asks the host page cache for an evicted page when that capability is
 available. If neither cache retains the page, inspection reports that state
 without advancing the R stream. Only the active inspected page is decoded for
 the tree view, and closing or leaving the inspector releases that tree handle.
+
+The Resource Tree explorer is implemented in `app.js` with its bookkeeping in
+`resource_tree.js`, which has no DOM dependency so unit tests can exercise it.
+It appears only for sessions whose `hello` declared
+`capabilities.resources: true` and renders one explorer per session in the
+`#resources` section, independently of the selected view. Each node keeps its
+expansion state, the children fetched so far, the next offset, and a
+browser-local fetch generation that discards responses made obsolete by a
+refresh or a collapse. The `hidden` field alone decides whether a node is hidden
+by default. Row text (label, class names, summary, unavailable reason) is built
+with the same helpers as the Object Tree and always set through `textContent`.

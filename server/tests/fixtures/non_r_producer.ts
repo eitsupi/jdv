@@ -112,10 +112,15 @@ function container(
   };
 }
 
-function fixtureNodeExists(id: string): FixtureNode | undefined {
+function fixtureNodeExists(
+  id: string,
+  extraRoot: FixtureNode[] = [],
+): FixtureNode | undefined {
   if (id === "c:locked") {
     return fixtureChildren(null)!.find((node) => node.id === id);
   }
+  const extra = extraRoot.find((node) => node.id === id);
+  if (extra) return extra;
   for (
     const parent of [
       null,
@@ -268,6 +273,26 @@ export class FixtureProducer {
     ) => boolean | Promise<boolean>)
     | undefined;
   #buffer: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+  readonly #extraRoot: FixtureNode[] = [];
+
+  /** Descriptor of the most recent view opened by `resources/open`. */
+  lastResourceDescriptor: Json | undefined;
+
+  /** Announces a newer generation of a view with another reason. */
+  reannounce(descriptor: Json, generation: number, reason: string): void {
+    this.#notify("view/open", { ...descriptor, generation, reason });
+  }
+
+  /** Adds a viewable table to the root listing, as if it appeared later. */
+  addRootTable(label: string): void {
+    this.#extraRoot.push({
+      id: `t:extra.${label}`,
+      label,
+      kind: "table",
+      has_children: false,
+      viewable: true,
+    });
+  }
 
   constructor(connection: Deno.Conn, options: FixtureOptions = {}) {
     this.#connection = connection;
@@ -424,9 +449,10 @@ export class FixtureProducer {
       const node = params.node === undefined ? null : params.node;
       const offset = Number(params.offset ?? 0);
       const limit = Number(params.limit ?? 200);
-      const all = node === null || typeof node === "string"
+      const base = node === null || typeof node === "string"
         ? fixtureChildren(node)
         : undefined;
+      const all = base && node === null ? [...base, ...this.#extraRoot] : base;
       if (!all) {
         await this.#reply(id, undefined, {
           code: "invalid_request",
@@ -447,7 +473,7 @@ export class FixtureProducer {
     }
     if (method === "resources/open") {
       const node = typeof params.node === "string"
-        ? fixtureNodeExists(params.node)
+        ? fixtureNodeExists(params.node, this.#extraRoot)
         : undefined;
       if (!node) {
         await this.#reply(id, undefined, {
@@ -472,6 +498,7 @@ export class FixtureProducer {
         [10, 20, 30],
         "resource",
       );
+      this.lastResourceDescriptor = descriptor;
       await this.#reply(id, descriptor);
       return;
     }
@@ -552,7 +579,7 @@ export class FixtureProducer {
         const selected = values.slice(offset, offset + limit);
         await this.#reply(id, {
           view,
-          generation: 1,
+          generation: Number(params.generation ?? 1),
           total: values.length,
           total_unfiltered: values.length,
           offset,
@@ -573,13 +600,17 @@ export class FixtureProducer {
       } else if (method === "view/schema") {
         await this.#reply(id, {
           view,
-          generation: 1,
+          generation: Number(params.generation ?? 1),
           nrow: values.length,
           ncol: 1,
           columns: descriptor.columns,
         });
       } else if (method === "view/close") {
-        await this.#reply(id, { view, generation: 1, closed: true });
+        await this.#reply(id, {
+          view,
+          generation: Number(params.generation ?? 1),
+          closed: true,
+        });
       } else {
         await this.#reply(id, undefined, {
           code: "unsupported",

@@ -150,6 +150,39 @@ session timezone, but the viewer applies the same explicit input rule to
 Snapshot and Paged tables because it cannot infer that timezone from a cached
 Snapshot.
 
+### Resource Tree explorer
+
+A session whose `hello` declared `capabilities.resources: true` gets an explorer
+area under the session list. It is shown whether or not a view is selected, and
+a session without views still has one, including a session that was already
+connected when the page loaded. A session that did not declare the capability
+shows nothing extra. The explorer lists the root with `resources/children` when
+the session appears and fetches the children of a node only when the user
+expands it. Several nodes can stay expanded at once. `Load more` requests the
+next page at the announced `next_offset`, so a page that holds only hidden nodes
+still offers the next one. Entries with an id already listed under the same
+parent since the last fetch from offset 0 are dropped as duplicates; entries
+without an id are never treated as duplicates.
+
+Nodes with `hidden: true` are not shown until the `Show hidden` toggle is
+checked. Only that field decides; labels such as a leading `.` are not
+inspected, and the toggle filters what was already fetched without a new
+request. `Open` is offered for `viewable` nodes and sends `resources/open`; the
+resulting view is the one the producer registered with `view/open` (reason
+`resource`), shown in the grid or tree viewer, and the response is used only to
+find it. The button stays disabled while the request is in flight and a failed
+open is not retried. Views opened this way have a `Close view` button in the
+view list; closing one leaves the explorer unchanged. A node with `unavailable`
+shows that token and cannot be expanded or opened. `kind` selects a short
+symbol, and an unrecognized token is shown as `unknown`.
+
+`Refresh` fetches the root and every visible expanded node again from offset 0
+and keeps expansion and open views. Nodes under a collapsed parent are fetched
+again when they are next expanded. The browser tags each fetch with a local
+counter, unrelated to a view generation; a response from before a refresh or a
+collapse is discarded. When the session closes, the explorer and its requests
+are discarded.
+
 ### Nested Arrow cells
 
 The sequential viewer can inspect list, large-list, fixed-size-list, struct,

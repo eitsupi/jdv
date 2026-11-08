@@ -17,6 +17,32 @@ import {
   openArrowChild,
 } from "/assets/arrow_tree.js";
 import { createArrowPageCache } from "/assets/arrow_page_cache.js";
+import {
+  beginOpen,
+  canExpand,
+  canOpen,
+  closeExplorer,
+  collapse,
+  createExplorer,
+  createResourceViewTracker,
+  declaresResources,
+  endOpen,
+  expand,
+  failLoad,
+  finishLoad,
+  hasMore,
+  hiddenCount,
+  isCurrent as isResourceFetchCurrent,
+  nodeFor,
+  nodeIdOf,
+  normalizeKind,
+  refreshAll,
+  RESOURCE_PAGE_SIZE,
+  rowLabel,
+  rowSummaryText,
+  startLoad,
+  visibleChildren,
+} from "/assets/resource_tree.js";
 import { decodeRows, querySnapshot } from "/assets/jdv_query.js";
 import {
   columnWindow,
@@ -27,6 +53,7 @@ import {
 const $ = (selector) => document.querySelector(selector);
 const status = $("#status");
 const sessionsElement = $("#sessions");
+const resourcesElement = $("#resources");
 const tablesElement = $("#tables");
 const viewer = $("#viewer");
 const treeViewer = $("#tree-viewer");
@@ -76,6 +103,10 @@ const TREE_PAGE_SIZE = 200;
 const COLUMN_WIDTH = 180;
 const ROW_WIDTH = 86;
 const knownSessions = new Map();
+// Resource Tree explorers by session id; only sessions that declared the
+// capability have one.
+const explorers = new Map();
+const resourceViews = createResourceViewTracker();
 const knownTables = new Map();
 const tableWaiters = new Map();
 const arrowPageCache = createArrowPageCache();
@@ -152,6 +183,8 @@ socket.addEventListener("message", (event) => {
     addSession(message.session, message.hello);
   } else if (message.type === "session/closed") {
     knownSessions.delete(message.session);
+    disposeExplorer(message.session);
+    resourceViews.forgetSession(message.session);
     for (const [key, entry] of knownTables) {
       if (entry.session === message.session) {
         entry.cache?.clear();
@@ -171,6 +204,7 @@ socket.addEventListener("message", (event) => {
       const key = `${message.session}\0${descriptor.view}`;
       const current = knownTables.get(key);
       if (current?.descriptor.generation === descriptor.generation) {
+        resourceViews.forget(message.session, descriptor.view);
         current.cache?.clear();
         current.arrowPageMetadata?.clear();
         arrowPageCache.deleteView(message.session, descriptor.view);
@@ -288,6 +322,7 @@ function addSession(id, hello) {
   if (typeof id !== "string") return;
   knownSessions.set(id, hello?.params ?? {});
   renderLists();
+  ensureExplorer(id);
 }
 
 function validStreamCacheCapability(value) {
@@ -310,6 +345,7 @@ function addTable(session, message) {
   if (
     previous && descriptor.generation <= previous.descriptor.generation
   ) return;
+  resourceViews.note(session, descriptor);
   previous?.cache?.clear();
   if (previous) {
     previous.arrowPageMetadata?.clear();
@@ -762,7 +798,10 @@ function renderLists() {
         item.append(track);
       }
     }
-    if (typeof descriptor.parent === "string") {
+    if (
+      typeof descriptor.parent === "string" ||
+      resourceViews.has(session, descriptor.view)
+    ) {
       const close = document.createElement("button");
       close.type = "button";
       close.textContent = "Close view";
@@ -1045,7 +1084,7 @@ function renderTreePage(state) {
     item.dataset.childIndex = String(
       child.index ?? state.offset + position + 1,
     );
-    const label = typeof child.label === "string" ? child.label : "(unnamed)";
+    const label = rowLabel(child);
     if (child.has_children === true) {
       const expand = document.createElement("button");
       expand.type = "button";
@@ -1068,20 +1107,9 @@ function renderTreePage(state) {
       text.textContent = label;
       item.append(text);
     }
-    const classes = Array.isArray(child.class)
-      ? child.class.filter((value) => typeof value === "string").join(", ")
-      : "";
-    const summary = document.createElement("span");
-    summary.className = "muted tree-summary";
-    summary.textContent = [classes, child.summary]
-      .filter((value) => typeof value === "string" && value.length > 0)
-      .join(" · ");
-    item.append(summary);
+    item.append(summaryElement(child));
     if (typeof child.unavailable === "string") {
-      const unavailable = document.createElement("span");
-      unavailable.className = "tree-unavailable";
-      unavailable.textContent = "Unavailable: " + child.unavailable;
-      item.append(unavailable);
+      item.append(unavailableElement(child.unavailable));
     } else if (child.viewable === true && Array.isArray(child.path)) {
       const open = document.createElement("button");
       open.type = "button";
@@ -2569,4 +2597,362 @@ async function refreshEarliestHostPage(state, epoch) {
   record.earliestHostPage = info.pages[0]?.page ?? null;
   mergeCacheInfo(record, info);
   updateSequentialProgress(state);
+}
+
+// Shared row parts for the Object Tree and the Resource Tree explorer.
+function summaryElement(child) {
+  const summary = document.createElement("span");
+  summary.className = "muted tree-summary";
+  summary.textContent = rowSummaryText(child);
+  return summary;
+}
+
+function unavailableElement(token) {
+  const unavailable = document.createElement("span");
+  unavailable.className = "tree-unavailable";
+  unavailable.textContent = "Unavailable: " + token;
+  return unavailable;
+}
+
+const KIND_GLYPHS = {
+  container: "▣",
+  table: "▦",
+  object: "{ }",
+  value: "•",
+  function: "ƒ",
+  unknown: "?",
+};
+
+// Creates the explorer of a session that declared resources and fetches its
+// root listing. Sessions without the capability get nothing.
+function ensureExplorer(session) {
+  const info = knownSessions.get(session);
+  if (!info || !declaresResources(info) || explorers.has(session)) return;
+  const element = document.createElement("article");
+  element.className = "resource-explorer";
+  element.dataset.session = session;
+  const entry = {
+    explorer: createExplorer(),
+    element,
+    status: null,
+    statusElement: null,
+    bodyElement: null,
+  };
+  buildExplorerFrame(session, entry);
+  explorers.set(session, entry);
+  resourcesElement.append(element);
+  loadResources(session, entry.explorer.root, 0);
+}
+
+function disposeExplorer(session) {
+  const entry = explorers.get(session);
+  if (!entry) return;
+  closeExplorer(entry.explorer);
+  entry.element.remove();
+  explorers.delete(session);
+}
+
+function cancelResourceRequests(ids) {
+  for (const id of ids) {
+    if (id) {
+      transport.cancel(id, "A newer Resource Tree request replaced this one.");
+    }
+  }
+}
+
+function loadResources(session, node, offset) {
+  const entry = explorers.get(session);
+  if (!entry) return;
+  const { explorer } = entry;
+  const token = startLoad(explorer, node, offset);
+  if (!token) return;
+  cancelResourceRequests([token.cancelId]);
+  const promise = transport.request(
+    session,
+    "resources/children",
+    { node: nodeIdOf(node), offset, limit: RESOURCE_PAGE_SIZE },
+    60_000,
+  );
+  node.requestId = promise.id ?? null;
+  renderExplorer(session);
+  promise.then((response) => {
+    if (!isResourceFetchCurrent(explorer, node, token)) return;
+    const { cancelIds } = finishLoad(explorer, node, token, response?.result);
+    cancelResourceRequests(cancelIds);
+    renderExplorer(session);
+  }).catch((error) => {
+    if (error?.name === "AbortError") return;
+    const message = error?.code
+      ? error.code + ": " + error.message
+      : error?.message ?? String(error);
+    if (failLoad(explorer, node, token, message)) renderExplorer(session);
+  });
+}
+
+function toggleResourceNode(session, child) {
+  const entry = explorers.get(session);
+  if (!entry) return;
+  const node = nodeFor(entry.explorer, child.id, child);
+  if (node.expanded) {
+    cancelResourceRequests([collapse(node)]);
+    renderExplorer(session);
+  } else if (expand(entry.explorer, node)) {
+    loadResources(session, node, 0);
+  } else renderExplorer(session);
+}
+
+function refreshResources(session) {
+  const entry = explorers.get(session);
+  if (!entry) return;
+  const { targets, cancelIds } = refreshAll(entry.explorer);
+  cancelResourceRequests(cancelIds);
+  for (const node of targets) loadResources(session, node, 0);
+  renderExplorer(session);
+}
+
+async function openResource(session, child) {
+  const entry = explorers.get(session);
+  if (!entry || !beginOpen(entry.explorer, child.id)) return;
+  const { explorer } = entry;
+  entry.status = { state: "waiting", text: "Opening the resource…" };
+  renderExplorer(session);
+  try {
+    // The producer registers the view with a view/open notification before it
+    // answers; the answer only identifies the view and never creates one.
+    const response = await transport.request(
+      session,
+      "resources/open",
+      { node: child.id },
+      60_000,
+    );
+    if (explorer.closed) return;
+    const reply = response?.result;
+    if (
+      typeof reply?.view !== "string" ||
+      !Number.isSafeInteger(reply.generation)
+    ) {
+      throw new Error("The producer returned an invalid resource view reply.");
+    }
+    const record = await announcedTable(session, reply.view, reply.generation);
+    if (explorer.closed) return;
+    const descriptor = record?.descriptor;
+    if (!descriptor) throw new Error("The resource view is no longer open.");
+    if (!viewSupport(descriptor)) {
+      throw new Error("The producer returned an invalid resource view.");
+    }
+    entry.status = null;
+    openView(session, descriptor);
+  } catch (error) {
+    if (explorer.closed || error?.name === "AbortError") return;
+    entry.status = {
+      state: "error",
+      text: error?.code
+        ? error.code + ": " + error.message
+        : error?.message ?? String(error),
+    };
+  } finally {
+    endOpen(explorer, child.id);
+    if (!explorer.closed) renderExplorer(session);
+  }
+}
+
+// The heading and controls are built once so that a re-render caused by a
+// response never replaces a button under the pointer; only the status line and
+// the listing are rebuilt.
+function buildExplorerFrame(session, entry) {
+  const { explorer, element } = entry;
+  const heading = document.createElement("h3");
+  heading.textContent = "Resources";
+  const detail = document.createElement("p");
+  detail.className = "muted";
+  detail.textContent = session;
+  const controls = document.createElement("div");
+  controls.className = "resource-controls";
+  const refresh = document.createElement("button");
+  refresh.type = "button";
+  refresh.dataset.action = "refresh-resources";
+  refresh.dataset.focusKey = "refresh";
+  refresh.textContent = "Refresh";
+  refresh.addEventListener("click", () => refreshResources(session));
+  const hiddenLabel = document.createElement("label");
+  hiddenLabel.className = "tree-options";
+  const hiddenToggle = document.createElement("input");
+  hiddenToggle.type = "checkbox";
+  hiddenToggle.dataset.action = "toggle-hidden";
+  hiddenToggle.dataset.focusKey = "hidden";
+  hiddenToggle.addEventListener("change", () => {
+    explorer.showHidden = hiddenToggle.checked;
+    renderExplorer(session);
+  });
+  hiddenLabel.append(hiddenToggle, " Show hidden");
+  controls.append(refresh, hiddenLabel);
+  const status = document.createElement("p");
+  status.className = "resource-status";
+  status.setAttribute("aria-live", "polite");
+  const body = document.createElement("div");
+  body.className = "resource-body";
+  element.replaceChildren(heading, detail, controls, status, body);
+  entry.statusElement = status;
+  entry.bodyElement = body;
+}
+
+function renderExplorer(session) {
+  const entry = explorers.get(session);
+  if (!entry) return;
+  const { explorer, element } = entry;
+  const focused = element.contains(document.activeElement)
+    ? document.activeElement.dataset.focusKey
+    : undefined;
+  const status = entry.statusElement;
+  if (entry.status) {
+    status.dataset.state = entry.status.state;
+    status.textContent = entry.status.text;
+    status.hidden = false;
+  } else {
+    status.hidden = true;
+    status.textContent = "";
+    delete status.dataset.state;
+  }
+  entry.bodyElement.replaceChildren(
+    renderResourceBody(session, explorer, explorer.root, []),
+  );
+  if (focused) {
+    for (const target of element.querySelectorAll("[data-focus-key]")) {
+      if (target.dataset.focusKey === focused) {
+        if (document.activeElement !== target) target.focus();
+        break;
+      }
+    }
+  }
+}
+
+// Renders the listing of one node: its visible children, then a status line,
+// an empty-state note, and the entry to the next page.
+function renderResourceBody(session, explorer, node, ancestors) {
+  const list = document.createElement("ul");
+  list.className = "resource-children";
+  const nodeKey = nodeIdOf(node) ?? "";
+  const children = visibleChildren(node, explorer.showHidden);
+  for (const child of children) {
+    const item = document.createElement("li");
+    item.className = "resource-node";
+    const row = document.createElement("div");
+    row.className = "resource-row";
+    const label = rowLabel(child);
+    const identified = typeof child.id === "string" && child.id.length > 0;
+    const expandable = canExpand(child);
+    if (expandable) {
+      const open = explorer.nodes.get(child.id)?.expanded === true;
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "resource-toggle";
+      toggle.dataset.action = "toggle-node";
+      toggle.dataset.focusKey = "toggle:" + child.id;
+      toggle.setAttribute("aria-expanded", String(open));
+      toggle.setAttribute(
+        "aria-label",
+        (open ? "Collapse " : "Expand ") + label,
+      );
+      toggle.textContent = open ? "▾" : "▸";
+      toggle.addEventListener(
+        "click",
+        () => toggleResourceNode(session, child),
+      );
+      row.append(toggle);
+    } else {
+      const spacer = document.createElement("span");
+      spacer.className = "resource-toggle";
+      row.append(spacer);
+    }
+    const kind = normalizeKind(child.kind);
+    const glyph = document.createElement("span");
+    glyph.className = "resource-kind";
+    glyph.dataset.kind = kind;
+    glyph.title = kind;
+    glyph.setAttribute("aria-hidden", "true");
+    glyph.textContent = KIND_GLYPHS[kind];
+    const name = document.createElement("span");
+    name.className = "resource-label";
+    name.textContent = label;
+    row.append(glyph, name, summaryElement(child));
+    if (typeof child.unavailable === "string") {
+      row.append(unavailableElement(child.unavailable));
+    } else if (canOpen(child)) {
+      const open = document.createElement("button");
+      open.type = "button";
+      open.dataset.action = "open-resource";
+      open.dataset.focusKey = "open:" + child.id;
+      open.textContent = "Open";
+      open.disabled = explorer.opening.has(child.id);
+      open.addEventListener("click", () => openResource(session, child));
+      row.append(open);
+    }
+    item.append(row);
+    if (identified && !ancestors.includes(child.id)) {
+      const childNode = explorer.nodes.get(child.id);
+      if (expandable && childNode?.expanded) {
+        item.append(
+          renderResourceBody(session, explorer, childNode, [
+            ...ancestors,
+            child.id,
+          ]),
+        );
+      }
+    }
+    list.append(item);
+  }
+
+  const notes = [];
+  if (node.loading) notes.push(node.loaded ? "Refreshing…" : "Loading…");
+  if (node.error) notes.push(node.error);
+  if (
+    node.loaded && !node.loading && !node.error && children.length === 0 &&
+    !hasMore(node)
+  ) {
+    const hidden = hiddenCount(node);
+    notes.push(
+      hidden > 0 ? `No visible resources (${hidden} hidden)` : "No resources",
+    );
+  }
+  for (const note of notes) {
+    const item = document.createElement("li");
+    item.className = "resource-note muted";
+    item.textContent = note;
+    if (note === node.error) {
+      item.dataset.state = "error";
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.dataset.action = "retry-resources";
+      retry.textContent = "Retry";
+      retry.addEventListener(
+        "click",
+        () => loadResources(session, node, node.failedOffset),
+      );
+      item.append(" ", retry);
+    }
+    list.append(item);
+  }
+  if (hasMore(node)) {
+    const item = document.createElement("li");
+    item.className = "resource-more";
+    const more = document.createElement("button");
+    more.type = "button";
+    more.dataset.action = "load-more";
+    more.dataset.focusKey = "more:" + nodeKey;
+    more.textContent = "Load more";
+    more.disabled = node.loading;
+    more.addEventListener(
+      "click",
+      () => loadResources(session, node, node.nextOffset),
+    );
+    item.append(more);
+    if (node.total !== null) {
+      const count = document.createElement("span");
+      count.className = "muted";
+      count.textContent = ` ${node.children.length} of ${node.total} loaded`;
+      item.append(count);
+    }
+    list.append(item);
+  }
+  return list;
 }
