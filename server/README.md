@@ -455,10 +455,12 @@ progress while an R function is sleeping, without manual RPC polling.
 
 With arf 0.7.0, the headless console returns EOF from `browser()` on every
 platform (earlier versions did so only on Windows), so the interactive
-regression holds R with a function-scoped `Sys.sleep()` instead. The EOF is
-confirmed from the frame depth at `browser()` and the completion marker on every
-platform; arf's `no callback set` log line is only reported, not required.
-Holding a `browser()` prompt is not yet tested.
+regression holds R with a function-scoped `Sys.sleep()` instead. On every
+platform the test checks, from the frame depth at `browser()` and the completion
+marker, that `browser()` returned on its own without console input or an error.
+That shows the frame did not hold; it does not prove that the read ended with an
+EOF. arf's `no callback set` log line is only reported, not required. Holding a
+`browser()` prompt is not yet tested.
 
 For the integration task, install jdv into a scratch library and install the
 optional R packages arrow, nanoarrow, jsonlite, bit64, and polars. Set

@@ -317,10 +317,11 @@ export function failLoad(explorer, node, token, message) {
   node.error = message;
   node.failedOffset = token.offset;
   // A failure says nothing about change notices: `dirty` stays as it is, so a
-  // notice that arrived while the sweep ran is not lost. The caller starts no
-  // trailing refresh after a failure; the next completed fetch, a collapse, a
-  // change notice or a manual Refresh asks again. `refreshAll` is the only
-  // place that clears the flag, so a failing fetch cannot retry in a loop.
+  // notice that arrived while the sweep ran is not lost. After a failure the
+  // caller checks whether a refresh is due, as after a completed fetch: a
+  // notice still pending starts one, and with none pending nothing is
+  // retried. `refreshAll` is the only place that clears the flag, so a
+  // failing fetch cannot retry in a loop.
   return true;
 }
 

@@ -657,8 +657,11 @@ Deno.test({
           "no callback set, returning 0",
           2_000,
         );
-        // The arf log line is auxiliary: it is reported but not required,
-        // because arf 0.7.0 ends the nested read without it on every platform.
+        // This checks that browser() was entered in a function frame and
+        // returned without console input and without an error. It shows that
+        // the frame did not hold, not that the cause was a console EOF. The arf
+        // log line is auxiliary: it is reported but not required, because arf
+        // 0.7.0 ends the nested read without it on every platform.
         const browserEofEvidence = {
           browserStartedMarker,
           browserStartFrameDepth,
@@ -668,7 +671,7 @@ Deno.test({
         };
         assert(
           isConfirmedBrowserEof(browserEofEvidence),
-          `The browser evaluation returned before console continuation, but the arf EOF evidence was incomplete: ${
+          `The browser evaluation returned before console continuation, but the evidence that browser() returned on its own was incomplete: ${
             JSON.stringify({
               ...browserEofEvidence,
               browserLog: eofLog.contents,
@@ -731,7 +734,7 @@ Deno.test({
         heldRowsId = "interactive-sleep-frame-rows";
         heldRowOffset = 2;
         console.log(
-          `interactive regression: arf browser EOF confirmed by a new log entry; browser hold is not treated as validated; function-scoped Sys.sleep frame depth ${sleepStartFrameDepth} is used for the transport hold`,
+          `interactive regression: browser() returned without console input (new arf EOF log entry: ${eofLog.found}); browser hold is not treated as validated; function-scoped Sys.sleep frame depth ${sleepStartFrameDepth} is used for the transport hold`,
         );
       } else {
         assert(
@@ -1202,7 +1205,7 @@ Deno.test("RawWebSocket answers ping frames and keeps reading text messages", as
   }
 });
 
-Deno.test("arf browser EOF requires the full observed evidence", () => {
+Deno.test("a browser() return without input requires the full observed evidence", () => {
   const evidence: BrowserEofEvidence = {
     browserStartedMarker: "BROWSER_STARTED:2",
     browserStartFrameDepth: 2,
@@ -1333,6 +1336,9 @@ interface BrowserEofEvidence {
   eofLogWasNew: boolean;
 }
 
+// Whether browser() was entered in a function frame and returned on its own,
+// without console input or an error. This is what the test can observe; it
+// does not distinguish a console EOF from another reason the read ended.
 function isConfirmedBrowserEof(evidence: BrowserEofEvidence): boolean {
   return evidence.browserStartedMarker.startsWith("BROWSER_STARTED:") &&
     Number.isSafeInteger(evidence.browserStartFrameDepth) &&
