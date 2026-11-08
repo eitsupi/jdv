@@ -10,6 +10,10 @@ jdv has three kinds of views:
 - **Lists:** Browse lists and other R objects as a tree.
 - **Apache Arrow:** View Arrow data as is, through the Arrow C stream interface.
 
+The viewer also has a resource explorer. Once R connects, it lists the
+variables of the global environment, so you can open one without calling
+`jdv_view()`.
+
 ## Why jdv?
 
 In [vscode-R](https://github.com/REditorSupport/vscode-R),
@@ -61,6 +65,13 @@ Other Arrow sources can be passed as a nanoarrow array stream:
 jdv::jdv_view(nanoarrow::as_nanoarrow_array_stream(x))
 ```
 
+Alternatively, run `jdv::jdv_connect()` and pick a variable in the resource
+explorer on the page. Variables are listed without being evaluated, so promises
+and active bindings are left alone, and variables starting with a dot are hidden
+until you choose to show them. A variable opened this way follows reassignment
+on R 4.6 or newer. To turn the explorer off, set `options(jdv.resources = FALSE)`
+before connecting.
+
 See `?jdv_view` for the R interface.
 
 ## How it works
@@ -86,6 +97,9 @@ positions as `special` objects keyed by `nan`, `pos_inf`, and `neg_inf`.
 Positions start at zero within each response; Snapshot data and pages share
 this format. An empty `na_rows` array means no missing rows, while an absent
 channel means missingness could not be extracted.
+
+A producer can also offer a resource tree, a browsable listing of what it can
+show. The R package serves the global environment as one.
 
 See `?jdv_spec` and `?jdv_query_spec` for the protocol. The common protocol is
 separate from the R producer's extensions. The [reference server](server/README.md)
