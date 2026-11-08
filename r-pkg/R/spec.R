@@ -341,8 +341,8 @@
 #' | `cancel`          | Host to producer     | Notification | Names pending work for the producer to cancel.                                |
 #' | `ack`             | Producer to host     | Notification | Cumulatively acknowledges complete host-to-producer JSONL frames read.       |
 #'
-#' The optional `resources/children` and `resources/open` methods are described
-#' under Resource trees.
+#' The optional `resources/children`, `resources/open`, `resources/subscribe`,
+#' and `resources/changed` methods are described under Resource trees.
 #'
 #'
 #' @section Common protocol: `view/schema`:
@@ -485,11 +485,12 @@
 #' `capabilities` is optional and, when present, is an object of optional
 #' session-level features. Each known member is a Boolean; any other value is
 #' invalid. An omitted member or object means `false`. Unknown members are
-#' ignored. The only member defined in v1 is `resources`, which declares the
-#' resource tree methods (see Resource trees). A host that does not use a
-#' feature ignores its member; declaring a feature does not by itself cause any
-#' request or notification. Capabilities are fixed for the session when `hello`
-#' is sent.
+#' ignored. The members defined in v1 are `resources`, which declares the
+#' resource tree methods, and `resource_changes`, which declares change
+#' notifications for the resource tree and requires `resources` (see Resource
+#' trees). A host that does not use a feature ignores its member; declaring a
+#' feature does not by itself cause any request or notification. Capabilities
+#' are fixed for the session when `hello` is sent.
 #'
 #' `hello` is the first producer message on a new connection. A disconnect
 #' closes the views associated with that connection.
@@ -862,8 +863,8 @@
 #' for one parent drops entries whose id it already added for that parent since
 #' the listing last started from offset 0; entries without an id are never
 #' treated as duplicates. The same node may appear under different parents. A
-#' viewer refreshes by requesting again from offset 0. Protocol v1 defines no
-#' change notification for resource trees; viewers refresh on request.
+#' viewer refreshes by requesting again from offset 0, either on request or
+#' after a change notification (see Change notifications below).
 #'
 #' ## `resources/open`
 #'
@@ -886,8 +887,8 @@
 #'
 #' The opened view is a top-level view and has no parent view. It follows the
 #' usual view lifecycle and descriptor capabilities, including the producer's
-#' view limits. Listing or refreshing the resource tree does not affect any view,
-#' and closing a view does not change the resource tree. Opening a node
+#' view limits. Listing or refreshing the resource tree does not affect any
+#' view, and closing a view does not change the resource tree. Opening a node
 #' registers a view like any other, so when the producer is at its view limit it
 #' may close an existing view to make room, and `view/closed` is sent as usual.
 #' Every successful open creates a new view, even for a node that is already
@@ -910,6 +911,49 @@
 #' view, closing a view or moving it to a new generation does not cancel them;
 #' they end with the requesting client or the session. Their responses are JSON
 #' only and never carry an Arrow IPC binary body.
+#'
+#' ## Change notifications
+#'
+#' A producer that declares `capabilities.resource_changes: true` (together with
+#' `resources: true`) can tell a subscribed host that its resource tree may have
+#' changed. The capability only makes the methods below available; declaring it
+#' does not start any monitoring or send any notification.
+#'
+#' | Method                | Direction        | Kind         | Result                                  |
+#' | --------------------- | ---------------- | ------------ | --------------------------------------- |
+#' | `resources/subscribe` | Host to producer | Request      | `{"enabled": <Boolean>}`, the new state. |
+#' | `resources/changed`   | Producer to host | Notification | None.                                   |
+#'
+#' A session starts unsubscribed. `resources/subscribe` takes a required Boolean
+#' `enabled` and sets the subscription of the session; repeating the same value
+#' has no further effect. The result reports the state that now applies. When
+#' enabling, the producer records the state it compares against before it
+#' answers, so a change made after the response is reported. A host that wants
+#' automatic updates therefore subscribes first and lists the tree after the
+#' subscription succeeds. A producer that did not declare the capability returns
+#' `unsupported` or `method_not_found`. The subscription belongs to the session:
+#' the producer has a single host, which decides how to combine the wishes of
+#' its own clients. It ends with the session.
+#'
+#' While subscribed, the producer sends
+#'
+#' ```json
+#' { "method": "resources/changed", "params": {} }
+#' ```
+#'
+#' when the listed resources may have changed. It is a hint that any listing the
+#' host holds may be out of date, not a description of a change: it names no
+#' node, several changes can be reported by one notification, and a notification
+#' may arrive when nothing visible changed. A host refreshes the parts of the
+#' tree it shows, as for a manual refresh, and lists hidden or collapsed parts
+#' again when they are next shown. A producer that detects a change within the
+#' scope its extension documents, while the session is subscribed and its
+#' notifications can be delivered, sends at least one notification after that
+#' change within a bounded delay. While an earlier `resources/changed` has not
+#' yet been delivered, the producer may drop a new one, because the earlier one
+#' already covers it. It sends no notification while unsubscribed. Unknown
+#' `params` members are ignored. Viewers keep a manual refresh, because a
+#' producer may not detect every change.
 #'
 #'
 #' @section R producer extension: Resource trees:
@@ -965,8 +1009,8 @@
 #' size: `data.frame [32 × 11]` (rows and columns), `matrix double [3 × 4]`,
 #' `double (100)`, `factor (150)`, `list (5)`, `function`, `environment` (no
 #' binding count), and the class name of an S4 object. A length is the stored
-#' length of the object, not the result of a user-defined `length()` method.
-#' The summary after a value is opened with `object/children` is unchanged.
+#' length of the object, not the result of a user-defined `length()` method. The
+#' summary after a value is opened with `object/children` is unchanged.
 #'
 #' A binding is read without evaluating it. Promises that have not been forced,
 #' active bindings, and missing arguments are listed with `viewable: false` and
