@@ -280,8 +280,9 @@ local({
     expect_identical(received$hello$method, "hello")
     expect_setequal(
       names(received$hello$params),
-      c("protocol", "session", "producer", "wake", "limits")
+      c("protocol", "session", "producer", "wake", "capabilities", "limits")
     )
+    expect_identical(received$hello$params$capabilities, list(resources = TRUE))
     expect_identical(received$hello$params$producer$name, "jdv")
     expect_identical(
       received$hello$params$producer$version,

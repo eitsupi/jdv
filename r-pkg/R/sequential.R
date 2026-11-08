@@ -100,7 +100,12 @@
   )
 }
 
-.jdv_sequential_register <- function(x, title = NULL, reason = "register") {
+.jdv_sequential_register <- function(
+  x,
+  title = NULL,
+  reason = "register",
+  title_slot = TRUE
+) {
   .jdv_assert_active()
   if (!is.null(title)) {
     title <- query_string(title, 4096L)
@@ -140,7 +145,11 @@
     stream = token,
     page_rows = .jdv_sequential_page_row_limit()
   )
-  title_key <- if (is.null(title)) NULL else .jdv_title_key(title)
+  title_key <- if (is.null(title) || !title_slot) {
+    NULL
+  } else {
+    .jdv_title_key(title)
+  }
   title_record <- function() {
     if (
       !is.null(title_key) &&

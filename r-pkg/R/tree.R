@@ -485,7 +485,15 @@
   )
 }
 
-.jdv_tree_summary <- function(x, depth = 0L, info = .jdv_tree_info(x)) {
+# `count_environment = FALSE` leaves the binding count out of an environment
+# summary; counting needs a full `ls()`, which a caller that summarizes many
+# values cannot afford.
+.jdv_tree_summary <- function(
+  x,
+  depth = 0L,
+  info = .jdv_tree_info(x),
+  count_environment = TRUE
+) {
   type <- info$type
   class_text <- .jdv_tree_class_text(info)
   list_format <- .jdv_tree_has_list_format(x, info)
@@ -515,6 +523,9 @@
       text <- paste0(text, ": ", paste(preview$values, collapse = ", "))
     }
     return(enc2utf8(substr(text, 1L, .jdv_tree_text_limit)))
+  }
+  if (identical(type, "environment") && !count_environment) {
+    return(enc2utf8(substr(class_text, 1L, .jdv_tree_text_limit)))
   }
   count <- if (identical(type, "environment")) {
     length(base::ls(envir = x, all.names = TRUE))
@@ -660,6 +671,37 @@
   })
 }
 
+# Read one environment binding without evaluating it, through the same C path
+# as object paths and binding tracking. The status is value, forced, delayed,
+# active, missing, unbound, opaque, or error; only value and forced carry an
+# object.
+.jdv_tree_binding_read <- function(env, name) {
+  tryCatch(
+    .Call(C_jdv_tree_child, env, "binding", 0, name),
+    error = function(error) list(status = "error", value = NULL)
+  )
+}
+
+# The token that explains why a child read with `status` cannot be opened, or
+# NULL when the status carries an object.
+.jdv_tree_unavailable_token <- function(status, name_too_long = FALSE) {
+  if (identical(status, "value") || identical(status, "forced")) {
+    return(NULL)
+  }
+  switch(
+    status,
+    unavailable = if (name_too_long) "path_limit" else "unavailable",
+    delayed = "delayed_binding",
+    active = "active_binding",
+    missing = "missing_binding",
+    unbound = "unavailable",
+    s4_data_opaque = "opaque_data_slot",
+    promise = "promise",
+    error = "unavailable",
+    "unavailable"
+  )
+}
+
 .jdv_tree_list_children <- function(
   x,
   path,
@@ -732,24 +774,7 @@
         error = function(error) list(status = "error", value = NULL)
       )
     }
-    unavailable <- if (
-      identical(got$status, "value") || identical(got$status, "forced")
-    ) {
-      NULL
-    } else {
-      switch(
-        got$status,
-        unavailable = if (name_too_long) "path_limit" else "unavailable",
-        delayed = "delayed_binding",
-        active = "active_binding",
-        missing = "missing_binding",
-        unbound = "unavailable",
-        s4_data_opaque = "opaque_data_slot",
-        promise = "promise",
-        error = "unavailable",
-        "unavailable"
-      )
-    }
+    unavailable <- .jdv_tree_unavailable_token(got$status, name_too_long)
     child_value <- got$value
     child_info <- NULL
     cycle <- is.null(unavailable) &&
@@ -960,14 +985,16 @@
   title = NULL,
   parent = NULL,
   reason = "register",
-  tracking = NULL
+  tracking = NULL,
+  title_slot = TRUE
 ) {
   .jdv_assert_active()
   if (!is.null(title)) {
     title <- query_string(title, 4096L)
   }
-  # A child's title is a display name only; it never takes a title slot.
-  title_key <- if (is.null(title) || !is.null(parent)) {
+  # A child's title, or a title with `title_slot = FALSE`, is a display name
+  # only; it never takes a title slot.
+  title_key <- if (is.null(title) || !is.null(parent) || !title_slot) {
     NULL
   } else {
     .jdv_title_key(title)

@@ -762,8 +762,8 @@ letters, digits, and \verb{_}.
 
 \code{hidden} marks a node that the producer's environment conventionally hides,
 for example a name with a leading dot in R. Producers still list hidden
-nodes, and they can be addressed and opened as usual; whether to show them
-is a viewer option. Hidden nodes count toward \code{offset}, \code{limit},
+nodes, and they can be addressed and opened as usual; whether to show them is
+a viewer option. Hidden nodes count toward \code{offset}, \code{limit},
 \code{total_children}, and \code{next_offset} like any other node, so a page may hold
 only hidden nodes and still have a next page; a viewer advances by
 \code{next_offset}, not by the number of rows it shows. \code{unavailable} is a short
@@ -822,14 +822,13 @@ false, return an empty page with \code{next_offset: null}.
 Children come in an order that stays the same while the listed resources do
 not change. The protocol does not otherwise define the order; a producer
 extension may. A page reflects the resources when it was handled: if
-resources are added or removed between page requests, a later page may
-repeat or skip entries, and \code{total_children} may change. A viewer that
-appends pages for one parent drops entries whose id it already added for that
-parent since the listing last started from offset 0; entries without an id
-are never treated as duplicates. The same node may appear under different
-parents. A viewer refreshes by requesting again from offset 0. Protocol v1
-defines no change notification for resource trees; viewers refresh on
-request.
+resources are added or removed between page requests, a later page may repeat
+or skip entries, and \code{total_children} may change. A viewer that appends pages
+for one parent drops entries whose id it already added for that parent since
+the listing last started from offset 0; entries without an id are never
+treated as duplicates. The same node may appear under different parents. A
+viewer refreshes by requesting again from offset 0. Protocol v1 defines no
+change notification for resource trees; viewers refresh on request.
 }
 
 \subsection{\code{resources/open}}{
@@ -878,6 +877,85 @@ only and never carry an Arrow IPC binary body.
 }
 
 \section{R producer extension}{
+ Resource trees:
+
+The R producer declares \code{capabilities.resources: true} in \code{hello} by default
+and serves the common resource tree with the variables of the global
+environment. Set \code{options(jdv.resources = FALSE)} to turn it off: the option
+is read when the session's \code{hello} is created and the result holds for the
+whole session, so changing it later takes effect for the next session. A
+session without the capability omits the \code{capabilities} member and answers
+\code{resources/children} and \code{resources/open} with \code{unsupported}, without
+revealing any name or summary. The same rule applies to the built-in
+transport and to an embedded session started by \code{\link[=jdv_register]{jdv_register()}}. The tree is
+available as soon as the session exists, also before any view is open.
+\code{\link[=jdv_handle_request]{jdv_handle_request()}} does not accept \verb{resources/*} requests and returns
+\code{method_not_found}.
+
+The root lists the bindings of the global environment, one level only. The
+search path and the contents of environments are not listed; an environment
+is opened as a view and explored with \code{object/children}. Every child has
+\code{has_children: false}. Bindings whose name starts with a dot are listed with
+\code{hidden: true}. Children are ordered by name in the byte order of their UTF-8
+form, independent of the locale; for example, \code{"Z"} comes before \code{"a"}.
+Because the global environment changes between requests, the weak consistency
+of the common protocol applies to paging.
+
+An id names a binding, not its value. It is \verb{b:} followed by the UTF-8 name,
+or \verb{h:} followed by the lowercase hex of the bytes of a name that is not
+valid UTF-8. A viewer must still treat it as opaque. A name whose id would
+exceed 16,384 UTF-8 bytes is listed without an \code{id}, with \code{viewable: false}
+and \code{unavailable: "id_limit"}. An id with an unknown form returns
+\code{invalid_request}; a binding that has been removed returns \code{unavailable}, for
+both \code{resources/children} and \code{resources/open}.\tabular{ll}{
+   \code{kind} \tab Value \cr
+   \code{table} \tab A data frame, or an atomic matrix. \cr
+   \code{function} \tab A closure, builtin, or special. \cr
+   \code{value} \tab Any other atomic vector, including a factor. \cr
+   \code{object} \tab Everything else, such as a list, an environment, \code{NULL}, or an S4 object. \cr
+   \code{unknown} \tab A binding that cannot be read safely, or whose name has no id. \cr
+}
+
+
+The kind is decided from the type and the class attribute alone. No
+\code{jdv_source()} method or other S3 method is called to choose it, so the view
+that finally opens is known only from its \code{view/open} descriptor. The R
+extension fields \code{class} and \code{type} have the same meaning as in
+\code{object/children}. \code{summary} is the bounded summary of \code{object/children}, at
+most 1,000 code points with the same depth and element limits, except that
+the summary of an environment has no binding count. The summary of an object
+with a \code{format()} method for its class may call that method, as the summary
+in \code{object/children} does.
+
+A binding is read without evaluating it. Promises that have not been forced,
+active bindings, and missing arguments are listed with \code{viewable: false} and
+\code{unavailable} set to \code{delayed_binding}, \code{active_binding}, or
+\code{missing_binding}, and \code{resources/open} returns \code{unavailable} for them;
+neither request evaluates them. A forced promise is read as its value. Before
+R 4.6.0 the value of a binding cannot be read without evaluation, so the
+names are listed with \code{kind: "unknown"}, \code{viewable: false}, and
+\code{unavailable: "opaque_binding"} (or \code{active_binding} for an active binding),
+and \code{resources/open} returns \code{unavailable}.
+
+\code{resources/open} accepts \code{node} and the optional \code{mode} and \code{collation} of
+\code{object/open}, with the same values and errors. It opens the current value of
+the binding as a new top-level view with \code{reason: "resource"}. The view's
+\code{title} is the variable name written as an R symbol (backquoted when it is
+not syntactic). It is a display name only and takes no title slot, so it
+never replaces another view, even one opened with \code{\link[=jdv_view]{jdv_view()}} under the same
+title, and opening the same variable again gives another view with the same
+title. The \code{view/open} notification is queued before the response, and the
+view is closed if the response cannot be built. Opening counts against
+\code{jdv.max_tables} like any other registration. From R 4.6.0 the view follows
+the binding as \code{\link[=jdv_view]{jdv_view()}} does: the descriptor carries \code{tracking}, refresh
+reads the current value, and a reassigned variable updates the view. A value
+that is a sequential stream, or an R version before 4.6.0, gives a view
+without tracking. Listing or opening never closes an existing view.
+
+A children page that does not fit \code{jdv.max_message_bytes} is shortened to
+fewer children, with \code{next_offset} pointing at the first child left out. A
+single child that does not fit returns \code{limit_exceeded}.
+
  \code{object/children}:
 
 This method is available only on tree views. A grid with \code{children: true}
@@ -1408,18 +1486,20 @@ include \code{jdv.max_message_bytes} (default 10 MiB, minimum 1,024),
 (default 64), \code{jdv.max_page_rows} (default 2,000), \code{jdv.snapshot_max_cells}
 (default 10,000), \code{jdv.snapshot_max_bytes} (default 10 MiB),
 \code{jdv.max_work_bytes} (default \code{Inf}), \code{jdv.max_cache_bytes} (default 32 MiB),
-and \code{jdv.max_query_rows} (default \code{Inf}). The work and row limits apply to
-full sort/filter operations; setting either option to a finite value restores
-the corresponding \code{limit_exceeded} guard. Page, work, cache, and query-row
-settings are captured when a Paged holder is registered; re-register the
-table to apply changed options. Each open Paged view separately retains its
-latest filtered/sorted row index outside \code{jdv.max_cache_bytes}, allowing
-consecutive pages for that query to reuse the index. A different query or
-unfiltered page releases the latest-index slot; an older result may remain in
-the LRU index cache. Clearing query caches, replacing the view generation, or
-closing the view releases both the slot and caches. This adds at most one
-potentially large result index per open Paged view; the 32 MiB default
-remains the budget for the LRU caches, including older result indices.
+and \code{jdv.max_query_rows} (default \code{Inf}). \code{jdv.resources} (default \code{TRUE})
+enables the resource tree for a session (see R producer extension: Resource
+trees). The work and row limits apply to full sort/filter operations; setting
+either option to a finite value restores the corresponding \code{limit_exceeded}
+guard. Page, work, cache, and query-row settings are captured when a Paged
+holder is registered; re-register the table to apply changed options. Each
+open Paged view separately retains its latest filtered/sorted row index
+outside \code{jdv.max_cache_bytes}, allowing consecutive pages for that query to
+reuse the index. A different query or unfiltered page releases the
+latest-index slot; an older result may remain in the LRU index cache.
+Clearing query caches, replacing the view generation, or closing the view
+releases both the slot and caches. This adds at most one potentially large
+result index per open Paged view; the 32 MiB default remains the budget for
+the LRU caches, including older result indices.
 
 \code{mode = "auto"} selects Snapshot only when both the cell estimate
 \code{nrow * max(1, ncol)} and a deterministic byte estimate fit their thresholds.

@@ -51,8 +51,9 @@ test_that("an embedded session queues hello before the first view/open", {
   hello <- .jdv_json_parse(messages[[1L]])$params
   expect_setequal(
     names(hello),
-    c("protocol", "session", "producer", "wake", "limits")
+    c("protocol", "session", "producer", "wake", "capabilities", "limits")
   )
+  expect_identical(unclass(hello$capabilities), list(resources = TRUE))
   expect_identical(hello$producer$name, "jdv")
   expect_identical(
     hello$producer$version,

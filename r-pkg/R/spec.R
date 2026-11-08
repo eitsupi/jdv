@@ -909,6 +909,87 @@
 #' only and never carry an Arrow IPC binary body.
 #'
 #'
+#' @section R producer extension: Resource trees:
+#'
+#'
+#' The R producer declares `capabilities.resources: true` in `hello` by default
+#' and serves the common resource tree with the variables of the global
+#' environment. Set `options(jdv.resources = FALSE)` to turn it off: the option
+#' is read when the session's `hello` is created and the result holds for the
+#' whole session, so changing it later takes effect for the next session. A
+#' session without the capability omits the `capabilities` member and answers
+#' `resources/children` and `resources/open` with `unsupported`, without
+#' revealing any name or summary. The same rule applies to the built-in
+#' transport and to an embedded session started by [jdv_register()]. The tree is
+#' available as soon as the session exists, also before any view is open.
+#' [jdv_handle_request()] does not accept `resources/*` requests and returns
+#' `method_not_found`.
+#'
+#' The root lists the bindings of the global environment, one level only. The
+#' search path and the contents of environments are not listed; an environment
+#' is opened as a view and explored with `object/children`. Every child has
+#' `has_children: false`. Bindings whose name starts with a dot are listed with
+#' `hidden: true`. Children are ordered by name in the byte order of their UTF-8
+#' form, independent of the locale; for example, `"Z"` comes before `"a"`.
+#' Because the global environment changes between requests, the weak consistency
+#' of the common protocol applies to paging.
+#'
+#' An id names a binding, not its value. It is `b:` followed by the UTF-8 name,
+#' or `h:` followed by the lowercase hex of the bytes of a name that is not
+#' valid UTF-8. A viewer must still treat it as opaque. A name whose id would
+#' exceed 16,384 UTF-8 bytes is listed without an `id`, with `viewable: false`
+#' and `unavailable: "id_limit"`. An id with an unknown form returns
+#' `invalid_request`; a binding that has been removed returns `unavailable`, for
+#' both `resources/children` and `resources/open`.
+#'
+#' | `kind`     | Value                                                                    |
+#' | ---------- | ------------------------------------------------------------------------ |
+#' | `table`    | A data frame, or an atomic matrix.                                       |
+#' | `function` | A closure, builtin, or special.                                          |
+#' | `value`    | Any other atomic vector, including a factor.                             |
+#' | `object`   | Everything else, such as a list, an environment, `NULL`, or an S4 object. |
+#' | `unknown`  | A binding that cannot be read safely, or whose name has no id.           |
+#'
+#' The kind is decided from the type and the class attribute alone. No
+#' `jdv_source()` method or other S3 method is called to choose it, so the view
+#' that finally opens is known only from its `view/open` descriptor. The R
+#' extension fields `class` and `type` have the same meaning as in
+#' `object/children`. `summary` is the bounded summary of `object/children`, at
+#' most 1,000 code points with the same depth and element limits, except that
+#' the summary of an environment has no binding count. The summary of an object
+#' with a `format()` method for its class may call that method, as the summary
+#' in `object/children` does.
+#'
+#' A binding is read without evaluating it. Promises that have not been forced,
+#' active bindings, and missing arguments are listed with `viewable: false` and
+#' `unavailable` set to `delayed_binding`, `active_binding`, or
+#' `missing_binding`, and `resources/open` returns `unavailable` for them;
+#' neither request evaluates them. A forced promise is read as its value. Before
+#' R 4.6.0 the value of a binding cannot be read without evaluation, so the
+#' names are listed with `kind: "unknown"`, `viewable: false`, and
+#' `unavailable: "opaque_binding"` (or `active_binding` for an active binding),
+#' and `resources/open` returns `unavailable`.
+#'
+#' `resources/open` accepts `node` and the optional `mode` and `collation` of
+#' `object/open`, with the same values and errors. It opens the current value of
+#' the binding as a new top-level view with `reason: "resource"`. The view's
+#' `title` is the variable name written as an R symbol (backquoted when it is
+#' not syntactic). It is a display name only and takes no title slot, so it
+#' never replaces another view, even one opened with [jdv_view()] under the same
+#' title, and opening the same variable again gives another view with the same
+#' title. The `view/open` notification is queued before the response, and the
+#' view is closed if the response cannot be built. Opening counts against
+#' `jdv.max_tables` like any other registration. From R 4.6.0 the view follows
+#' the binding as [jdv_view()] does: the descriptor carries `tracking`, refresh
+#' reads the current value, and a reassigned variable updates the view. A value
+#' that is a sequential stream, or an R version before 4.6.0, gives a view
+#' without tracking. Listing or opening never closes an existing view.
+#'
+#' A children page that does not fit `jdv.max_message_bytes` is shortened to
+#' fewer children, with `next_offset` pointing at the first child left out. A
+#' single child that does not fit returns `limit_exceeded`.
+#'
+#'
 #' @section R producer extension: `object/children`:
 #'
 #'
@@ -1460,18 +1541,20 @@
 #' (default 64), `jdv.max_page_rows` (default 2,000), `jdv.snapshot_max_cells`
 #' (default 10,000), `jdv.snapshot_max_bytes` (default 10 MiB),
 #' `jdv.max_work_bytes` (default `Inf`), `jdv.max_cache_bytes` (default 32 MiB),
-#' and `jdv.max_query_rows` (default `Inf`). The work and row limits apply to
-#' full sort/filter operations; setting either option to a finite value restores
-#' the corresponding `limit_exceeded` guard. Page, work, cache, and query-row
-#' settings are captured when a Paged holder is registered; re-register the
-#' table to apply changed options. Each open Paged view separately retains its
-#' latest filtered/sorted row index outside `jdv.max_cache_bytes`, allowing
-#' consecutive pages for that query to reuse the index. A different query or
-#' unfiltered page releases the latest-index slot; an older result may remain in
-#' the LRU index cache. Clearing query caches, replacing the view generation, or
-#' closing the view releases both the slot and caches. This adds at most one
-#' potentially large result index per open Paged view; the 32 MiB default
-#' remains the budget for the LRU caches, including older result indices.
+#' and `jdv.max_query_rows` (default `Inf`). `jdv.resources` (default `TRUE`)
+#' enables the resource tree for a session (see R producer extension: Resource
+#' trees). The work and row limits apply to full sort/filter operations; setting
+#' either option to a finite value restores the corresponding `limit_exceeded`
+#' guard. Page, work, cache, and query-row settings are captured when a Paged
+#' holder is registered; re-register the table to apply changed options. Each
+#' open Paged view separately retains its latest filtered/sorted row index
+#' outside `jdv.max_cache_bytes`, allowing consecutive pages for that query to
+#' reuse the index. A different query or unfiltered page releases the
+#' latest-index slot; an older result may remain in the LRU index cache.
+#' Clearing query caches, replacing the view generation, or closing the view
+#' releases both the slot and caches. This adds at most one potentially large
+#' result index per open Paged view; the 32 MiB default remains the budget for
+#' the LRU caches, including older result indices.
 #'
 #' `mode = "auto"` selects Snapshot only when both the cell estimate
 #' `nrow * max(1, ncol)` and a deterministic byte estimate fit their thresholds.

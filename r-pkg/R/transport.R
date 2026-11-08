@@ -440,22 +440,26 @@
   invisible(NULL)
 }
 
+# The resource tree is enabled or disabled for the session when its hello is
+# created; changing `jdv.resources` later does not change a running session.
 .jdv_hello <- function(limits = .jdv_state$transport_limits) {
   .jdv_state$session_counter <- .jdv_state$session_counter + 1L
-  list(
-    method = "hello",
-    params = list(
-      protocol = 1L,
-      session = paste0("r-", Sys.getpid(), "-", .jdv_state$session_counter),
-      producer = list(
-        name = "jdv",
-        version = as.character(utils::packageVersion("jdv")),
-        runtime = list(name = "R", version = as.character(getRversion()))
-      ),
-      wake = TRUE,
-      limits = limits
-    )
+  .jdv_state$resources <- .jdv_resources_option()
+  params <- list(
+    protocol = 1L,
+    session = paste0("r-", Sys.getpid(), "-", .jdv_state$session_counter),
+    producer = list(
+      name = "jdv",
+      version = as.character(utils::packageVersion("jdv")),
+      runtime = list(name = "R", version = as.character(getRversion()))
+    ),
+    wake = TRUE
   )
+  if (.jdv_state$resources) {
+    params$capabilities <- list(resources = TRUE)
+  }
+  params$limits <- limits
+  list(method = "hello", params = params)
 }
 
 .jdv_transport_send <- function(messages) {
