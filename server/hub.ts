@@ -31,6 +31,7 @@ const CANCEL_RESERVE_FRAMES = 32;
 const CANCEL_RESERVE_BYTES = 16 * 1024;
 const MAX_RETAINED_REQUEST_BYTES = 16 * 1024 * 1024;
 const BINARY_PREFIX_BYTES = 4;
+const MAX_NODE_ID_BYTES = 16_384;
 const encoder = new TextEncoder();
 
 interface ProducerLimits {
@@ -55,13 +56,28 @@ interface ViewRecord {
   sequentialOwner?: BrowserClient;
 }
 
+// A request either targets one view generation or the session itself. Session
+// scope requests (resources/*) name no view, so view closes and generation
+// changes never cancel them.
+type RequestScope =
+  | { kind: "view"; view: string; generation: number }
+  | { kind: "session" };
+
+interface ChildrenQuery {
+  node: string | null;
+  offset: number;
+  limit: number;
+}
+
 interface PendingRequest {
   id: string;
   client: BrowserClient | null;
   browserId: string;
   method: string;
-  view: string;
-  generation: number;
+  scope: RequestScope;
+  // Validated resources/children parameters, used for coalescing and for
+  // checking the response.
+  children?: ChildrenQuery;
   deadline: number;
   state: "queued" | "live" | "cancelled" | "expired";
   localEnded: boolean;
@@ -95,6 +111,7 @@ interface ProducerSession {
   hello: JsonObject;
   limits: ProducerLimits;
   wake: boolean;
+  resources: boolean;
   peer: ProtocolPeer;
   views: Map<string, ViewRecord>;
   pending: Map<string, PendingRequest>;
@@ -257,6 +274,8 @@ export class Hub {
         "stream/next",
         "stream/cache/info",
         "stream/cache/get",
+        "resources/children",
+        "resources/open",
       ].includes(method)
     ) {
       client.send({
@@ -264,6 +283,42 @@ export class Hub {
         id: browserId,
         code: "method_not_found",
         message: "Unsupported request method.",
+      });
+      return;
+    }
+    if (method === "resources/children" || method === "resources/open") {
+      if (!session.resources) {
+        client.send({
+          type: "error",
+          id: browserId,
+          session: session.id,
+          code: "unsupported",
+          message: "The producer session does not support resource trees.",
+        });
+        return;
+      }
+      const children = method === "resources/children"
+        ? parseChildrenQuery(params)
+        : undefined;
+      if (
+        method === "resources/children"
+          ? !children
+          : !validNodeId(params.node, false)
+      ) {
+        client.send({
+          type: "error",
+          id: browserId,
+          session: session.id,
+          code: "invalid_request",
+          message: method === "resources/children"
+            ? "resources/children requires a valid node, offset, and limit."
+            : "resources/open requires a node id.",
+        });
+        return;
+      }
+      this.#queueRequest(client, browserId, session, value, params, {
+        scope: { kind: "session" },
+        children: children ?? undefined,
       });
       return;
     }
@@ -438,8 +493,9 @@ export class Hub {
       if (
         (current.sequentialOwner && current.sequentialOwner !== client) ||
         [...session.pending.values()].some((pending) =>
-          pending.method === "stream/next" && pending.view === view &&
-          pending.generation === generation
+          pending.method === "stream/next" &&
+          pending.scope.kind === "view" && pending.scope.view === view &&
+          pending.scope.generation === generation
         )
       ) {
         client.send({
@@ -466,10 +522,35 @@ export class Hub {
       return;
     }
 
+    this.#queueRequest(client, browserId, session, value, params, {
+      scope: { kind: "view", view, generation: Number(generation) },
+      streamMaxRows,
+      owner: method === "stream/next" ? current : undefined,
+    });
+  }
+
+  #queueRequest(
+    client: BrowserClient,
+    browserId: string,
+    session: ProducerSession,
+    value: JsonObject,
+    params: JsonObject,
+    options: {
+      scope: RequestScope;
+      children?: ChildrenQuery;
+      streamMaxRows?: number;
+      owner?: ViewRecord;
+    },
+  ): void {
+    const method = value.method as string;
+    const { scope, children, streamMaxRows } = options;
     const timeout = Number.isFinite(value.timeoutMs)
       ? Math.min(MAX_TIMEOUT_MS, Math.max(100, Number(value.timeoutMs)))
       : DEFAULT_TIMEOUT_MS;
-    const maxBytes = params.max_bytes === undefined
+    // Session scope responses are JSON only, so max_bytes does not apply.
+    const maxBytes = scope.kind === "session"
+      ? 0
+      : params.max_bytes === undefined
       ? effectiveBinaryByteLimit(session)
       : params.max_bytes;
     if (!Number.isSafeInteger(maxBytes) || Number(maxBytes) < 0) {
@@ -488,8 +569,8 @@ export class Hub {
       client,
       browserId,
       method,
-      view,
-      generation: Number(generation),
+      scope,
+      children,
       deadline: Date.now() + timeout,
       state: "queued",
       localEnded: false,
@@ -572,7 +653,7 @@ export class Hub {
       });
       return;
     }
-    if (method === "stream/next") current.sequentialOwner = client;
+    if (options.owner) options.owner.sequentialOwner = client;
     pending.timeoutTimer = setTimeout(
       () => this.#expire(session, pending),
       timeout,
@@ -732,7 +813,8 @@ export class Hub {
       typeof params.session !== "string" ||
       !isValidProducerSessionId(params.session) || !limits ||
       !producer ||
-      (params.wake !== undefined && typeof params.wake !== "boolean")
+      (params.wake !== undefined && typeof params.wake !== "boolean") ||
+      !validCapabilities(params.capabilities)
     ) {
       void peer.send({
         id: null,
@@ -762,6 +844,8 @@ export class Hub {
       hello: message,
       limits,
       wake: params.wake === true,
+      resources: isObject(params.capabilities) &&
+        params.capabilities.resources === true,
       peer,
       views: new Map(),
       pending: new Map(),
@@ -813,8 +897,12 @@ export class Hub {
       return;
     }
     this.#releaseRequestSlot(session, pending);
-    const view = session.views.get(pending.view);
-    const currentGeneration = view?.generation === pending.generation;
+    const scope = pending.scope;
+    const view = scope.kind === "view"
+      ? session.views.get(scope.view)
+      : undefined;
+    const currentGeneration = scope.kind === "view" &&
+      view?.generation === scope.generation;
     // A sent view/refresh is a generation-moving command: the producer queues the new
     // view/open before the response, so the response is expected to arrive
     // after its own generation was superseded. Cancel, timeout, close, and
@@ -824,7 +912,8 @@ export class Hub {
     const refreshAck = pending.method === "view/refresh" ||
       pending.method === "view/track";
     const deliver = !pending.localEnded && pending.state === "live" &&
-      (currentGeneration || refreshAck) && Date.now() < pending.deadline;
+      (scope.kind === "session" || currentGeneration || refreshAck) &&
+      Date.now() < pending.deadline;
     if (
       refreshAck &&
       !(pending.method === "view/track"
@@ -845,17 +934,38 @@ export class Hub {
       this.#scheduleDrain(session);
       return;
     }
-    if (
+    if (scope.kind === "session") {
+      // Resource tree responses are JSON only and name no view.
+      const invalid = body !== undefined ||
+        (Object.hasOwn(message, "result") &&
+          !validResourceResult(pending, message.result));
+      if (invalid) {
+        if (deliver) {
+          pending.client?.send({
+            type: "error",
+            id: pending.browserId,
+            session: session.id,
+            code: "invalid_request",
+            message: body !== undefined
+              ? "The producer returned a binary body for a resource request."
+              : "The producer returned a response that does not match the request.",
+          });
+        }
+        this.#finishPending(session, pending);
+        this.#scheduleDrain(session);
+        return;
+      }
+    } else if (
       body && isObject(message.result) &&
-      (message.result.view !== pending.view ||
-        message.result.generation !== pending.generation)
+      (message.result.view !== scope.view ||
+        message.result.generation !== scope.generation)
     ) {
       if (deliver) {
         pending.client?.send({
           type: "error",
           id: pending.browserId,
           session: session.id,
-          code: message.result.view !== pending.view
+          code: message.result.view !== scope.view
             ? "invalid_request"
             : "stale_generation",
           message:
@@ -904,8 +1014,8 @@ export class Hub {
     const closedCurrentView = pending.method === "view/close" &&
       currentGeneration &&
       isObject(message.result) && message.result.closed === true &&
-      message.result.view === pending.view &&
-      message.result.generation === pending.generation;
+      scope.kind === "view" && message.result.view === scope.view &&
+      message.result.generation === scope.generation;
     if (deliver) {
       const response: JsonObject = {
         ...message,
@@ -944,8 +1054,8 @@ export class Hub {
       }
     }
     this.#finishPending(session, pending);
-    if (closedCurrentView) {
-      this.#closeCachedView(session, pending.view, pending.generation);
+    if (closedCurrentView && scope.kind === "view") {
+      this.#closeCachedView(session, scope.view, scope.generation);
     }
     this.#scheduleDrain(session);
   }
@@ -1171,7 +1281,10 @@ export class Hub {
     keepSentRefresh = false,
   ): void {
     for (const pending of session.pending.values()) {
-      if (pending.view === view && pending.generation === generation) {
+      if (
+        pending.scope.kind === "view" && pending.scope.view === view &&
+        pending.scope.generation === generation
+      ) {
         // Moving to a newer generation must not cancel the refresh that
         // caused it; its response is checked when it arrives.
         if (
@@ -1339,9 +1452,21 @@ export class Hub {
   }
 
   #sameQueryLane(left: PendingRequest, right: PendingRequest): boolean {
+    if (left.client !== right.client || left.method !== right.method) {
+      return false;
+    }
+    // Session scope requests have no view; only children pages of the same
+    // node and offset share a lane, so a later offset is never dropped.
+    if (left.method === "resources/children") {
+      return left.scope.kind === "session" && right.scope.kind === "session" &&
+        left.children !== undefined && right.children !== undefined &&
+        left.children.node === right.children.node &&
+        left.children.offset === right.children.offset;
+    }
     if (
-      left.client !== right.client || left.method !== right.method ||
-      left.view !== right.view || left.generation !== right.generation
+      left.scope.kind !== "view" || right.scope.kind !== "view" ||
+      left.scope.view !== right.scope.view ||
+      left.scope.generation !== right.scope.generation
     ) return false;
     if (left.method === "grid/rows") return true;
     if (left.method !== "object/children") return false;
@@ -1718,7 +1843,8 @@ function isObject(value: unknown): value is JsonObject {
 }
 
 function isCoalescibleMethod(method: string): boolean {
-  return method === "grid/rows" || method === "object/children";
+  return method === "grid/rows" || method === "object/children" ||
+    method === "resources/children";
 }
 
 function isObjectRequest(
@@ -1860,6 +1986,67 @@ function encodeBrowserBinary(
   return result;
 }
 
+// The hello capabilities member is optional; when present it is an object whose
+// known members are Booleans. Unknown members are ignored.
+function validCapabilities(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isObject(value)) return false;
+  return !Object.hasOwn(value, "resources") ||
+    typeof value.resources === "boolean";
+}
+
+// A node id is a non-empty string of at most 16,384 UTF-8 bytes. The root is
+// null or omitted where allowed.
+function validNodeId(value: unknown, allowRoot: boolean): boolean {
+  if (value === null || value === undefined) return allowRoot;
+  return typeof value === "string" && value.length > 0 &&
+    encoder.encode(value).byteLength <= MAX_NODE_ID_BYTES;
+}
+
+function parseChildrenQuery(params: JsonObject): ChildrenQuery | null {
+  if (!validNodeId(params.node, true)) return null;
+  const offset = Object.hasOwn(params, "offset") ? params.offset : 0;
+  const limit = Object.hasOwn(params, "limit") ? params.limit : 200;
+  if (
+    typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0 ||
+    typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 ||
+    limit > 500
+  ) return null;
+  return {
+    node: typeof params.node === "string" ? params.node : null,
+    offset,
+    limit,
+  };
+}
+
+// Checks a successful session scope result against the request. A
+// resources/open result is the opened view's descriptor, which the view/open
+// notification already registered, so only its shape is checked.
+function validResourceResult(
+  pending: PendingRequest,
+  result: unknown,
+): boolean {
+  if (!isObject(result)) return false;
+  if (pending.method !== "resources/children") return true;
+  const query = pending.children;
+  if (!query) return false;
+  const children = result.children;
+  const total = result.total_children;
+  const next = result.next_offset;
+  if (
+    !Object.hasOwn(result, "node") || result.node !== query.node ||
+    result.offset !== query.offset || !Array.isArray(children) ||
+    children.length > query.limit ||
+    !Object.hasOwn(result, "total_children") ||
+    !(total === null ||
+      (typeof total === "number" && Number.isSafeInteger(total) &&
+        total >= 0)) ||
+    !Object.hasOwn(result, "next_offset")
+  ) return false;
+  if (next === null) return true;
+  return children.length > 0 && next === query.offset + children.length;
+}
+
 function isTerminalResponse(message: JsonObject): boolean {
   const hasResult = Object.hasOwn(message, "result");
   const hasError = Object.hasOwn(message, "error");
@@ -1877,9 +2064,11 @@ function isRefreshResponse(
 ): boolean {
   if (Object.hasOwn(message, "error")) return true;
   const result = message.result;
-  return isObject(result) && result.view === pending.view &&
-    result.previous_generation === pending.generation &&
-    result.generation === pending.generation + 1 &&
+  const scope = pending.scope;
+  return scope.kind === "view" && isObject(result) &&
+    result.view === scope.view &&
+    result.previous_generation === scope.generation &&
+    result.generation === scope.generation + 1 &&
     result.refreshed === true;
 }
 
@@ -1889,9 +2078,11 @@ function isTrackResponse(
 ): boolean {
   if (Object.hasOwn(message, "error")) return true;
   const result = message.result;
-  return isObject(result) && result.view === pending.view &&
-    (result.generation === pending.generation ||
-      result.generation === pending.generation + 1) &&
+  const scope = pending.scope;
+  return scope.kind === "view" && isObject(result) &&
+    result.view === scope.view &&
+    (result.generation === scope.generation ||
+      result.generation === scope.generation + 1) &&
     sanitizeTracking(result.tracking) !== null;
 }
 

@@ -254,6 +254,31 @@ notification only while `generation` is the one it holds. The bundled viewer
 shows the state next to the Refresh button and offers a pause and resume toggle
 while following is not lost.
 
+The server also accepts the optional resource tree requests `resources/children`
+and `resources/open`. They are session scope requests: `params` carries no
+`view` or `generation`, so they work while a session has no views, and closing a
+view or moving it to a new generation never cancels them. They end with the
+requesting client (disconnect or `cancel`), a timeout, or the session, and they
+use the same request, queue, byte, ACK, wake, deadline, and cancellation limits
+as view requests, including the 32 active request cap. A session accepts them
+only when its `hello` declared `capabilities.resources: true`; otherwise the
+server answers `unsupported` without contacting the producer, while an unknown
+method still gets `method_not_found`. `resources/children` takes an optional
+`node` (omitted, `null`, or a non-empty id of at most 16,384 UTF-8 bytes), a
+non-negative safe integer `offset`, and an integer `limit` from 1 through 500;
+other values return `invalid_request`. `resources/open` requires a node id. The
+server checks a successful `resources/children` result: `node` and `offset` must
+repeat the request, `children` must be an array of at most `limit` entries,
+`total_children` must be a non-negative safe integer or `null`, and
+`next_offset` must be `null` or equal `offset` plus a non-empty page length. A
+mismatch, or any binary body, becomes an `invalid_request` error. A
+`resources/open` view is registered from the producer's `view/open`
+notification, which arrives before the response; the response alone never
+creates a view. Unsent `resources/children` requests are replaced only by a
+request from the same client for the same session, node, and offset, so a
+request for another page stays queued. `resources/open` is never coalesced
+because every open creates a new view.
+
 Browser WebSocket input frames are limited to 64 KiB. Incoming producer JSONL
 frames are limited to 10 MiB.
 
@@ -265,7 +290,10 @@ with `in_use` while the connected session stays active.
 
 The hello must include positive safe integer limits for `max_unacked_frames`,
 `max_unacked_bytes`, `queue_messages`, `queue_bytes`, `max_request_bytes`, and
-`max_message_bytes`. `wake` is an optional boolean that defaults to `false`; the
+`max_message_bytes`. `capabilities` is an optional object of Boolean session
+features; the only one the server uses is `resources`. A non-object
+`capabilities` or a non-Boolean `resources` rejects the hello, and unknown
+members are ignored. `wake` is an optional boolean that defaults to `false`; the
 host sends periodic `wake` notifications only when it is `true`. The host clamps
 its unacknowledged wire window to 128 frames and 512 KiB, with up to 32 frames
 and 16 KiB reserved for cancellation while preserving ordinary capacity under
